@@ -268,7 +268,7 @@ impl ImportService {
 
     pub async fn import(&self, db: &Db, images_dir: &Path, url: &str) -> Result<Recipe> {
         self.import_inner(db, images_dir, url).await.inspect_err(|e| {
-            // step 7: raise import_failed
+            db.notify(crate::Event::ImportFailed { url: url.into(), reason: e.to_string() });
             eprintln!("mealier: import_failed url={url} reason={e}");
         })
     }

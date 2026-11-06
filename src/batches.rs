@@ -314,8 +314,11 @@ impl Db {
             self.get_batch(id).await?;
             return Err(Error::Validation("batch is already done".into()));
         }
-        // step 7: batch_logged
-        self.get_batch(id).await
+        let detail = self.get_batch(id).await?;
+        let b = &detail.batch;
+        let recipe_name = self.get_recipe(b.recipe_id).await.ok().flatten().map(|r| r.content.name).unwrap_or_default();
+        self.notify(crate::Event::BatchLogged { batch_id: id, recipe_id: b.recipe_id, recipe_name, rating: b.rating, made_on: b.made_on.clone() });
+        Ok(detail)
     }
     /// Stores one photo for the batch (png, jpeg or webp by magic bytes).
     // ponytail: stored as uploaded; resize-on-upload (spec, Architecture) is still owed.

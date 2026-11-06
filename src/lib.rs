@@ -9,6 +9,7 @@ mod people;
 mod planner;
 mod recipes;
 mod units;
+mod webhooks;
 mod urlimport;
 mod web;
 pub use batches::*;
@@ -18,6 +19,7 @@ pub use people::*;
 pub use planner::*;
 pub use recipes::*;
 pub use urlimport::*;
+pub use webhooks::*;
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -43,6 +45,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
 pub struct Db {
     pool: SqlitePool,
+    notifier: Notifier,
 }
 
 impl Db {
@@ -64,7 +67,7 @@ impl Db {
     async fn connect(opts: SqliteConnectOptions, max: u32) -> Result<Db> {
         let pool = SqlitePoolOptions::new().max_connections(max).connect_with(opts).await?;
         sqlx::migrate!().run(&pool).await?;
-        Ok(Db { pool })
+        Ok(Db { pool, notifier: Notifier::from_env() })
     }
 
     /// Raw pool. Exists only for tests of DB-level guarantees (snapshot trigger,

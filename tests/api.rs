@@ -243,6 +243,12 @@ async fn openapi_lists_every_recipe_route() {
         "DELETE /api/shopping-list-items/{id}",
         "POST /api/shopping-lists/{id}/recipes",
         "POST /api/shopping-lists/{id}/batches",
+        "GET /api/webhooks",
+        "POST /api/webhooks",
+        "GET /api/webhooks/{id}",
+        "PUT /api/webhooks/{id}",
+        "DELETE /api/webhooks/{id}",
+        "POST /api/webhooks/{id}/test",
     ];
     expected.sort();
     assert_eq!(found, expected);

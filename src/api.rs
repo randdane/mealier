@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use axum::extract::FromRef;
 
-use crate::{EntryInput, ItemInput, MealPlanEntry, ShoppingList, ShoppingListSummary, ImportService, Parsed, Batch, BatchDetail, BatchInput, BatchLineInput, Db, Error, Recipe, RecipeInput, RecipeSummary, Snapshot, SnapshotSummary};
+use crate::{Webhook, WebhookInput, EntryInput, ItemInput, MealPlanEntry, ShoppingList, ShoppingListSummary, ImportService, Parsed, Batch, BatchDetail, BatchInput, BatchLineInput, Db, Error, Recipe, RecipeInput, RecipeSummary, Snapshot, SnapshotSummary};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
@@ -25,7 +25,8 @@ pub struct ErrorBody {
     create, list, get_one, update, archive, snapshots, get_snapshot,
     start_batch, list_batches, get_batch, put_batch, add_line, finish_batch, add_photo, parse, import_url,
     get_plan, add_plan_entry, put_plan_entry, delete_plan_entry,
-    get_lists, create_list, get_list, add_list_item, put_item, delete_item, list_add_recipe, list_add_batch
+    get_lists, create_list, get_list, add_list_item, put_item, delete_item, list_add_recipe, list_add_batch,
+    list_webhooks, create_webhook, get_webhook, put_webhook, delete_webhook, test_webhook
 ))]
 struct ApiDoc;
 
@@ -431,6 +432,76 @@ async fn list_add_batch(State(db): State<Db>, Path(id): Path<i64>, Json(b): Json
     Ok(Json(db.add_batch_to_list(id, b.batch_id).await?))
 }
 
+// step 8: admin only (all webhook config routes)
+#[utoipa::path(get, path = "/api/webhooks", responses((status = 200, description = "All webhooks", body = [Webhook])))]
+async fn list_webhooks(State(db): State<Db>) -> Result<Json<Vec<Webhook>>, Error> {
+    Ok(Json(db.list_webhooks().await?))
+}
+
+// step 8: admin only
+#[utoipa::path(
+    post, path = "/api/webhooks", request_body = WebhookInput,
+    responses((status = 201, description = "Webhook created", body = Webhook), (status = 422, description = "Invalid webhook", body = ErrorBody))
+)]
+async fn create_webhook(State(db): State<Db>, Json(i): Json<WebhookInput>) -> Result<(StatusCode, Json<Webhook>), Error> {
+    Ok((StatusCode::CREATED, Json(db.create_webhook(i).await?)))
+}
+
+// step 8: admin only
+#[utoipa::path(
+    get, path = "/api/webhooks/{id}", params(("id" = i64, Path, description = "Webhook id")),
+    responses((status = 200, description = "The webhook", body = Webhook), (status = 404, description = "No such webhook", body = ErrorBody))
+)]
+async fn get_webhook(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Webhook>, Error> {
+    Ok(Json(db.get_webhook(id).await?))
+}
+
+// step 8: admin only
+#[utoipa::path(
+    put, path = "/api/webhooks/{id}", params(("id" = i64, Path, description = "Webhook id")), request_body = WebhookInput,
+    responses(
+        (status = 200, description = "Webhook replaced", body = Webhook),
+        (status = 404, description = "No such webhook", body = ErrorBody),
+        (status = 422, description = "Invalid webhook", body = ErrorBody),
+    )
+)]
+async fn put_webhook(State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<WebhookInput>) -> Result<Json<Webhook>, Error> {
+    Ok(Json(db.update_webhook(id, i).await?))
+}
+
+// step 8: admin only
+#[utoipa::path(
+    delete, path = "/api/webhooks/{id}", params(("id" = i64, Path, description = "Webhook id")),
+    responses((status = 204, description = "Webhook deleted"), (status = 404, description = "No such webhook", body = ErrorBody))
+)]
+async fn delete_webhook(State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
+    db.delete_webhook(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// What a test delivery got back.
+#[derive(Serialize, ToSchema)]
+struct TestOutcome {
+    /// True when the receiver answered 2xx.
+    ok: bool,
+    /// The receiver's HTTP status.
+    status: u16,
+}
+
+// step 8: admin only
+#[utoipa::path(
+    post, path = "/api/webhooks/{id}/test", params(("id" = i64, Path, description = "Webhook id")),
+    responses(
+        (status = 200, description = "A test event was sent (to a disabled webhook too); the receiver's status is reported", body = TestOutcome),
+        (status = 404, description = "No such webhook", body = ErrorBody),
+        (status = 422, description = "The receiver could not be reached", body = ErrorBody),
+    )
+)]
+async fn test_webhook(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<TestOutcome>, Error> {
+    let status = db.send_test(id).await?;
+    Ok(Json(TestOutcome { ok: (200..300).contains(&status), status }))
+}
+
 /// What every handler can reach: the database and the content-addressed images dir.
 #[derive(Clone)]
 pub struct AppState {
@@ -474,6 +545,9 @@ pub fn router_with(state: AppState, import: ImportService) -> Router {
         .route("/api/shopping-list-items/{id}", put(put_item).delete(delete_item))
         .route("/api/shopping-lists/{id}/recipes", post(list_add_recipe))
         .route("/api/shopping-lists/{id}/batches", post(list_add_batch))
+        .route("/api/webhooks", get(list_webhooks).post(create_webhook))
+        .route("/api/webhooks/{id}", get(get_webhook).put(put_webhook).delete(delete_webhook))
+        .route("/api/webhooks/{id}/test", post(test_webhook))
         .route("/api/openapi.json", get(openapi))
         .merge(crate::web::routes())
         .layer(Extension(Arc::new(import)))

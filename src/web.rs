@@ -40,6 +40,11 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/lists/add-batch", post(list_add_batch))
         .route("/lists/items/{id}/check", post(item_check))
         .route("/lists/items/{id}/delete", post(item_delete))
+        // step 8: admin only
+        .route("/settings/webhooks", get(webhooks_page).post(webhook_create))
+        .route("/settings/webhooks/{id}/delete", post(webhook_delete))
+        .route("/settings/webhooks/{id}/toggle", post(webhook_toggle))
+        .route("/settings/webhooks/{id}/test", post(webhook_test))
         .route("/images/{name}", get(image))
         .route("/static/htmx.min.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript")], include_str!("../static/htmx.min.js")) }))
         .route("/static/app.css", get(|| async { ([(header::CONTENT_TYPE, "text/css")], include_str!("../static/app.css")) }))
@@ -897,4 +902,57 @@ async fn list_of(db: &Db, item: i64) -> Result<i64> {
 
 async fn back_to_list(db: &Db, item: i64) -> Redirect {
     Redirect::to(&format!("/lists/{}", list_of(db, item).await.unwrap_or(0)))
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "webhooks.html")]
+struct WebhooksPage {
+    hooks: Vec<crate::Webhook>,
+    msg: String,
+}
+
+#[derive(Deserialize)]
+struct MsgQuery {
+    msg: Option<String>,
+}
+
+async fn webhooks_page(State(db): State<Db>, Query(q): Query<MsgQuery>) -> Result<WebhooksPage> {
+    Ok(WebhooksPage { hooks: db.list_webhooks().await?, msg: q.msg.unwrap_or_default() })
+}
+
+#[derive(Deserialize)]
+struct WebhookForm {
+    name: String,
+    kind: String,
+    url: String,
+    #[serde(default)]
+    ntfy_tags: String,
+    ev_import_failed: Option<String>,
+    ev_batch_logged: Option<String>,
+}
+
+async fn webhook_create(State(db): State<Db>, axum::Form(f): axum::Form<WebhookForm>) -> Result<Redirect> {
+    let events = [("import_failed", f.ev_import_failed), ("batch_logged", f.ev_batch_logged)].into_iter().filter(|(_, on)| on.is_some()).map(|(e, _)| e.to_string()).collect();
+    db.create_webhook(crate::WebhookInput { name: f.name, kind: f.kind, url: f.url, events, ntfy_tags: f.ntfy_tags, enabled: true }).await?;
+    Ok(Redirect::to("/settings/webhooks"))
+}
+
+async fn webhook_delete(State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
+    db.delete_webhook(id).await?;
+    Ok(Redirect::to("/settings/webhooks"))
+}
+
+async fn webhook_toggle(State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
+    let w = db.get_webhook(id).await?;
+    db.update_webhook(id, crate::WebhookInput { name: w.name, kind: w.kind, url: w.url, events: w.events, ntfy_tags: w.ntfy_tags, enabled: !w.enabled }).await?;
+    Ok(Redirect::to("/settings/webhooks"))
+}
+
+async fn webhook_test(State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
+    let msg = match db.send_test(id).await {
+        Ok(s) => format!("Test sent; the receiver answered {s}."),
+        Err(Error::NotFound(n)) => return Err(Error::NotFound(n)),
+        Err(e) => e.to_string(),
+    };
+    Ok(Redirect::to(&format!("/settings/webhooks?{}", serde_urlencoded::to_string([("msg", msg)]).unwrap_or_default())))
 }
