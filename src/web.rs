@@ -19,6 +19,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/recipes/new", get(new_recipe_page))
         .route("/recipes/{id}", get(recipe_page))
         .route("/recipes/{id}/edit", get(edit_recipe_page).post(edit_recipe))
+        .route("/recipes/{id}/nutrition/estimate", post(nutrition_fragment))
         .route("/recipes/{id}/ingredients/review", get(review_page).post(review_save))
         .route("/recipes/{id}/cook", get(cook_page))
         .route("/settings/cook-theme", post(set_theme))
@@ -45,6 +46,9 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/settings/webhooks/{id}/delete", post(webhook_delete))
         .route("/settings/webhooks/{id}/toggle", post(webhook_toggle))
         .route("/settings/webhooks/{id}/test", post(webhook_test))
+        // Admin only, like the webhooks above.
+        .route("/settings/llm", get(llm_page))
+        .route("/settings/llm/test", post(llm_test))
         .route("/images/{name}", get(image))
         .route("/static/htmx.min.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript")], include_str!("../static/htmx.min.js")) }))
         .route("/static/app.css", get(|| async { ([(header::CONTENT_TYPE, "text/css")], include_str!("../static/app.css")) }))
@@ -397,13 +401,62 @@ struct RecipeForm {
     name: String,
     description: String,
     ingredients: String,
+    /// The nutrition fieldset, already rendered.
+    nutrition: String,
 }
 
-async fn new_recipe_page() -> RecipeForm {
-    RecipeForm { heading: "New recipe", action: "/recipes".into(), name: String::new(), description: String::new(), ingredients: String::new() }
+/// The nutrition inputs; also what the estimate button swaps in. `id` is 0 on the new-recipe form.
+#[derive(Template)]
+#[template(path = "nutrition.html")]
+struct NutritionFields {
+    id: i64,
+    can_estimate: bool,
+    calories: String,
+    protein_g: String,
+    fat_g: String,
+    carbs_g: String,
 }
 
-async fn edit_recipe_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<RecipeForm> {
+impl NutritionFields {
+    fn new(id: i64, can_estimate: bool, n: Option<&crate::Nutrition>) -> Self {
+        let n = n.cloned().unwrap_or_default();
+        NutritionFields { id, can_estimate, calories: opt(n.calories), protein_g: opt(n.protein_g), fat_g: opt(n.fat_g), carbs_g: opt(n.carbs_g) }
+    }
+
+    fn html(&self) -> Result<String> {
+        self.render().map_err(|e| Error::Io(std::io::Error::other(e)))
+    }
+}
+
+async fn new_recipe_page() -> Result<RecipeForm> {
+    Ok(RecipeForm {
+        heading: "New recipe",
+        action: "/recipes".into(),
+        name: String::new(),
+        description: String::new(),
+        ingredients: String::new(),
+        nutrition: NutritionFields::new(0, false, None).html()?,
+    })
+}
+
+type Svc = axum::Extension<std::sync::Arc<crate::ImportService>>;
+
+/// The LLM's nutrition guess for a recipe. Recipe first, so an unknown id costs no request.
+pub(crate) async fn estimate_recipe(db: &Db, svc: &crate::ImportService, id: i64) -> Result<crate::NutritionEstimate> {
+    let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
+    let llm = svc.llm().ok_or_else(|| Error::Validation("no LLM is configured (set LLM_PROVIDER)".into()))?;
+    let lines: Vec<String> = r.content.ingredients.iter().map(|i| if i.original_text.is_empty() { ingredient_line(i, 1.0) } else { i.original_text.clone() }).filter(|l| !l.is_empty()).collect();
+    llm.estimate_nutrition(&r.content.name, &lines).await
+}
+
+/// htmx target: the nutrition fieldset filled with a guess. Saves nothing.
+async fn nutrition_fragment(State(db): State<Db>, axum::Extension(svc): Svc, Path(id): Path<i64>) -> Result<axum::response::Html<String>> {
+    let e = estimate_recipe(&db, &svc, id).await?;
+    let n = crate::Nutrition { calories: e.calories, protein_g: e.protein, fat_g: e.fat, carbs_g: e.carbs };
+    Ok(axum::response::Html(NutritionFields::new(id, true, Some(&n)).html()?))
+}
+
+async fn edit_recipe_page(State(db): State<Db>, axum::Extension(svc): Svc, Path(id): Path<i64>) -> Result<RecipeForm> {
     let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
     let lines: Vec<String> = r
         .content
@@ -417,6 +470,7 @@ async fn edit_recipe_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<R
         name: r.content.name,
         description: r.content.description,
         ingredients: lines.join("\n"),
+        nutrition: NutritionFields::new(id, svc.llm().is_some(), r.content.nutrition.as_ref()).html()?,
     })
 }
 
@@ -427,11 +481,37 @@ struct RecipeFormData {
     description: String,
     #[serde(default)]
     ingredients: String,
+    // Absent means "leave nutrition as it is"; present (even blank) replaces it.
+    calories: Option<String>,
+    protein_g: Option<String>,
+    fat_g: Option<String>,
+    carbs_g: Option<String>,
+}
+
+impl RecipeFormData {
+    /// `None` when the form carried no nutrition fields at all.
+    fn nutrition(&self) -> Result<Option<Option<crate::Nutrition>>> {
+        let f = [&self.calories, &self.protein_g, &self.fat_g, &self.carbs_g];
+        if f.iter().all(|v| v.is_none()) {
+            return Ok(None);
+        }
+        let n = |v: &Option<String>| number(v.as_deref().unwrap_or_default());
+        let n = crate::Nutrition { calories: n(&self.calories)?, protein_g: n(&self.protein_g)?, fat_g: n(&self.fat_g)?, carbs_g: n(&self.carbs_g)? };
+        Ok(Some((n != crate::Nutrition::default()).then_some(n)))
+    }
+}
+
+/// Where the review screen is; `suggested` lists the lines the LLM filled so it can mark them.
+fn review_url(id: i64, suggested: &[usize]) -> String {
+    let base = format!("/recipes/{id}/ingredients/review");
+    if suggested.is_empty() {
+        return base;
+    }
+    format!("{base}?suggested={}", suggested.iter().map(usize::to_string).collect::<Vec<_>>().join(","))
 }
 
 /// Parsed form of a line: what `parse_line` found, or just the text when it found nothing.
 pub(crate) fn parsed_input(text: &str, units: &[crate::Unit], foods: &[crate::Food]) -> IngredientInput {
-    // step 9: LLM fallback for unparsed lines
     let p = parse_line(text, units, foods);
     let keep = p.confidence != crate::Confidence::None;
     IngredientInput {
@@ -449,16 +529,19 @@ struct ImportForm {
     url: String,
 }
 
-async fn import_form(State(s): State<AppState>, axum::Extension(svc): axum::Extension<std::sync::Arc<crate::ImportService>>, axum::Form(f): axum::Form<ImportForm>) -> Result<Redirect> {
-    let r = svc.import(&s.db, &s.images_dir, &f.url).await?;
-    Ok(Redirect::to(&format!("/recipes/{}/ingredients/review", r.id)))
+async fn import_form(State(s): State<AppState>, axum::Extension(svc): Svc, axum::Form(f): axum::Form<ImportForm>) -> Result<Redirect> {
+    let (r, suggested) = svc.import_suggested(&s.db, &s.images_dir, &f.url).await?;
+    Ok(Redirect::to(&review_url(r.id, &suggested)))
 }
 
-async fn create_recipe(State(db): State<Db>, axum::Form(f): axum::Form<RecipeFormData>) -> Result<Redirect> {
+async fn create_recipe(State(db): State<Db>, axum::Extension(svc): Svc, axum::Form(f): axum::Form<RecipeFormData>) -> Result<Redirect> {
     let (units, foods) = (db.units().await?, db.foods().await?);
-    let ingredients = f.ingredients.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| parsed_input(l, &units, &foods)).collect();
-    let r = db.create_recipe(RecipeInput { name: f.name, description: f.description, ingredients, ..Default::default() }).await?;
-    Ok(Redirect::to(&format!("/recipes/{}/ingredients/review", r.id)))
+    let nutrition = f.nutrition()?.flatten();
+    let mut ingredients: Vec<IngredientInput> = f.ingredients.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| parsed_input(l, &units, &foods)).collect();
+    let all = vec![true; ingredients.len()];
+    let suggested = svc.fill_lines(&mut ingredients, &all, &units, &foods).await;
+    let r = db.create_recipe(RecipeInput { name: f.name, description: f.description, nutrition, ingredients, ..Default::default() }).await?;
+    Ok(Redirect::to(&review_url(r.id, &suggested)))
 }
 
 fn to_input(i: &crate::Ingredient) -> IngredientInput {
@@ -472,27 +555,25 @@ fn to_input(i: &crate::Ingredient) -> IngredientInput {
     }
 }
 
-async fn edit_recipe(State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<RecipeFormData>) -> Result<Redirect> {
+async fn edit_recipe(State(db): State<Db>, axum::Extension(svc): Svc, Path(id): Path<i64>, axum::Form(f): axum::Form<RecipeFormData>) -> Result<Redirect> {
     let old = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?.content;
     let (units, foods) = (db.units().await?, db.foods().await?);
-    // A line left as it was keeps what the user already reviewed; only new or changed text is parsed.
-    let ingredients = f
-        .ingredients
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(|l| match old.ingredients.iter().find(|i| i.original_text == l) {
-            Some(i) => to_input(i),
-            None => parsed_input(l, &units, &foods),
-        })
-        .collect();
+    let nutrition = f.nutrition()?.unwrap_or(old.nutrition);
+    // A line left as it was keeps what the user already reviewed (and is not sent to the LLM again); only new or changed text is parsed.
+    let (mut ingredients, mut is_new) = (Vec::new(), Vec::new());
+    for l in f.ingredients.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let known = old.ingredients.iter().find(|i| i.original_text == l);
+        is_new.push(known.is_none());
+        ingredients.push(known.map_or_else(|| parsed_input(l, &units, &foods), to_input));
+    }
+    let suggested = svc.fill_lines(&mut ingredients, &is_new, &units, &foods).await;
     db.update_recipe(
         id,
         RecipeInput {
             name: f.name,
             description: f.description,
             source_url: old.source_url,
-            nutrition: old.nutrition,
+            nutrition,
             tags: old.tags,
             categories: old.categories,
             cookbooks: old.cookbooks,
@@ -502,12 +583,13 @@ async fn edit_recipe(State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): a
         },
     )
     .await?;
-    Ok(Redirect::to(&format!("/recipes/{id}/ingredients/review")))
+    Ok(Redirect::to(&review_url(id, &suggested)))
 }
 
 struct ReviewRow {
     original: String,
     confidence: &'static str,
+    suggested: bool,
     qty_min: String,
     qty_max: String,
     unit_id: i64,
@@ -525,14 +607,23 @@ struct ReviewPage {
     foods: Vec<crate::Food>,
 }
 
-async fn review_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<ReviewPage> {
+#[derive(Deserialize)]
+struct ReviewQuery {
+    /// "1,3": line numbers the LLM filled.
+    suggested: Option<String>,
+}
+
+async fn review_page(State(db): State<Db>, Path(id): Path<i64>, Query(q): Query<ReviewQuery>) -> Result<ReviewPage> {
     let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
+    let suggested: Vec<usize> = q.suggested.unwrap_or_default().split(',').filter_map(|n| n.trim().parse().ok()).collect();
     let rows = r
         .content
         .ingredients
         .iter()
-        .map(|i| ReviewRow {
+        .enumerate()
+        .map(|(n, i)| ReviewRow {
             original: i.original_text.clone(),
+            suggested: suggested.contains(&n),
             confidence: match (i.food_id, i.qty_min) {
                 (Some(_), Some(_)) => "parsed",
                 (None, None) if i.unit_id.is_none() => "not parsed",
@@ -939,4 +1030,40 @@ async fn webhook_test(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>
         Err(e) => e.to_string(),
     };
     Ok(Redirect::to(&format!("/settings/webhooks?{}", serde_urlencoded::to_string([("msg", msg)]).unwrap_or_default())))
+}
+
+// LLM settings.
+
+#[derive(Template, WebTemplate)]
+#[template(path = "llm.html")]
+struct LlmPage {
+    enabled: bool,
+    provider: String,
+    model: String,
+    msg: String,
+}
+
+fn llm_view(svc: &crate::ImportService, msg: String) -> LlmPage {
+    let llm = svc.llm();
+    LlmPage {
+        enabled: llm.is_some(),
+        provider: llm.map(|l| serde_json::to_value(l.provider()).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()).unwrap_or_default(),
+        model: llm.map(|l| l.model().to_string()).unwrap_or_default(),
+        msg,
+    }
+}
+
+async fn llm_page(_: crate::Admin, axum::Extension(svc): Svc) -> LlmPage {
+    llm_view(&svc, String::new())
+}
+
+async fn llm_test(_: crate::Admin, axum::Extension(svc): Svc) -> LlmPage {
+    let msg = match svc.llm() {
+        None => "No LLM is configured.".to_string(),
+        Some(l) => match l.test().await {
+            Ok(()) => "Test passed.".to_string(),
+            Err(e) => format!("Test failed: {e}"),
+        },
+    };
+    llm_view(&svc, msg)
 }

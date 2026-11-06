@@ -187,7 +187,6 @@ fn squash(s: &str) -> String {
 /// Rule-based parse of one ingredient line. Never fails: a line the rules
 /// cannot read comes back with `Confidence::None` and its `original_text`.
 pub fn parse_line(text: &str, units: &[Unit], foods: &[Food]) -> Parsed {
-    // step 9: LLM fallback for unparsed lines
     let mut notes: Vec<String> = Vec::new();
     let mut body = String::new();
 
@@ -261,4 +260,62 @@ pub fn parse_line(text: &str, units: &[Unit], foods: &[Food]) -> Parsed {
     };
     let note = if confidence == Confidence::None { String::new() } else { notes.join(", ") };
     Parsed { qty_min, qty_max, unit_id, food_id, note, original_text: text.to_string(), confidence }
+}
+
+const FALLBACK_SYSTEM: &str = "You parse recipe ingredient lines. Each user line is `index: text`. For each line return its index, \
+the amount (qty_min and qty_max; equal when it is not a range), the unit name, the food name and any note. \
+Use null for whatever the line does not say. Never invent an amount.";
+const FALLBACK_HINT: &str = r#"{"lines":[{"index":0,"qty_min":1,"qty_max":1,"unit":"cup","food":"flour","note":"sifted"}]}"#;
+/// More than this many unparsed lines in one recipe is not worth one prompt.
+const FALLBACK_MAX_LINES: usize = 100;
+
+fn is_unparsed(l: &crate::IngredientInput) -> bool {
+    l.qty_min.is_none() && l.qty_max.is_none() && l.unit_id.is_none() && l.food_id.is_none() && l.note.is_empty() && !l.original_text.trim().is_empty()
+}
+
+/// A finite amount of zero or more; anything else the model sends is dropped.
+fn amount_of(v: &serde_json::Value) -> Option<f64> {
+    v.as_f64().filter(|n| n.is_finite() && *n >= 0.0)
+}
+
+/// Sends the lines the rules could not read (no amount, unit, food or note) to the LLM in one
+/// request and fills them in place. Returns the indices it filled. Never fails: an LLM error
+/// is logged and the lines stay as the rules left them. Model output is data: names are
+/// matched against the existing tables, and what does not match stays as note text.
+pub async fn fill_unparsed(llm: &crate::Llm, lines: &mut [crate::IngredientInput], units: &[Unit], foods: &[Food]) -> Vec<usize> {
+    let todo: Vec<usize> = (0..lines.len()).filter(|&i| is_unparsed(&lines[i])).take(FALLBACK_MAX_LINES).collect();
+    if todo.is_empty() {
+        return Vec::new();
+    }
+    let user = todo.iter().map(|&i| format!("{i}: {}", squash(&lines[i].original_text))).collect::<Vec<_>>().join("\n");
+    let answer = match llm.complete_json(FALLBACK_SYSTEM, &user, FALLBACK_HINT).await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("mealier: ingredient fallback skipped: {e}");
+            return Vec::new();
+        }
+    };
+    let mut filled = Vec::new();
+    for e in answer["lines"].as_array().into_iter().flatten() {
+        let Some(i) = e["index"].as_u64().map(|i| i as usize).filter(|i| todo.contains(i) && !filled.contains(i)) else { continue };
+        let qty_min = amount_of(&e["qty_min"]);
+        let qty_max = qty_min.map(|min| amount_of(&e["qty_max"]).unwrap_or(min).max(min));
+        let (unit_name, food_name) = (squash(e["unit"].as_str().unwrap_or_default()), squash(e["food"].as_str().unwrap_or_default()));
+        let unit_id = Some(unit_name.as_str()).filter(|n| !n.is_empty()).and_then(|n| match unit(n, units) {
+            Some((id, "")) => Some(id),
+            _ => None,
+        });
+        let food_id = Some(food_name.as_str()).filter(|n| !n.is_empty()).and_then(|n| food(n, foods).filter(|(_, r)| r.start == 0 && r.end == n.len()).map(|(id, _)| id));
+        // Names that matched nothing stay readable as note text.
+        let unknown = [(unit_id.is_none()).then_some(unit_name), (food_id.is_none()).then_some(food_name)].into_iter().flatten().filter(|n| !n.is_empty()).collect::<Vec<_>>().join(" ");
+        let note = [unknown, squash(e["note"].as_str().unwrap_or_default())].into_iter().filter(|n| !n.is_empty()).collect::<Vec<_>>().join(", ");
+        if qty_min.is_none() && unit_id.is_none() && food_id.is_none() && note.is_empty() {
+            continue;
+        }
+        let l = &mut lines[i];
+        (l.qty_min, l.qty_max, l.unit_id, l.food_id, l.note) = (qty_min, qty_max, unit_id, food_id, note);
+        filled.push(i);
+    }
+    filled.sort_unstable();
+    filled
 }

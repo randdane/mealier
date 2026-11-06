@@ -1,0 +1,9 @@
+<fieldset id="nutrition">
+  <legend>Nutrition (per serving)</legend>
+  <label>Calories <input type="number" name="calories" value="{{ calories }}" step="any" min="0" inputmode="decimal"></label>
+  <label>Protein (g) <input type="number" name="protein_g" value="{{ protein_g }}" step="any" min="0" inputmode="decimal"></label>
+  <label>Fat (g) <input type="number" name="fat_g" value="{{ fat_g }}" step="any" min="0" inputmode="decimal"></label>
+  <label>Carbs (g) <input type="number" name="carbs_g" value="{{ carbs_g }}" step="any" min="0" inputmode="decimal"></label>
+  {% if can_estimate %}<button type="button" class="quiet" hx-post="/recipes/{{ id }}/nutrition/estimate" hx-target="#nutrition" hx-swap="outerHTML">Estimate with LLM</button>
+  <small>Fills the fields above; nothing is saved until you save the recipe.</small>{% endif %}
+</fieldset>

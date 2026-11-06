@@ -27,6 +27,7 @@ pub struct ErrorBody {
     get_plan, add_plan_entry, put_plan_entry, delete_plan_entry,
     get_lists, create_list, get_list, add_list_item, put_item, delete_item, list_add_recipe, list_add_batch,
     list_webhooks, create_webhook, get_webhook, put_webhook, delete_webhook, test_webhook,
+    get_llm, test_llm, nutrition_estimate,
     crate::login::me, crate::login::list_users, crate::login::disable_user, crate::login::enable_user
 ), modifiers(&BearerScheme), security(("bearer" = [])))]
 struct ApiDoc;
@@ -512,6 +513,52 @@ async fn test_webhook(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>
     Ok(Json(TestOutcome { ok: (200..300).contains(&status), status }))
 }
 
+/// The active LLM, never its key.
+#[derive(Serialize, ToSchema)]
+struct LlmInfo {
+    provider: Option<crate::Provider>,
+    model: Option<String>,
+    enabled: bool,
+}
+
+#[utoipa::path(get, path = "/api/llm", responses((status = 200, description = "The configured provider and model; `enabled` is false when LLM_PROVIDER is unset", body = LlmInfo)))]
+async fn get_llm(_: crate::Admin, Extension(svc): Extension<Arc<ImportService>>) -> Json<LlmInfo> {
+    let llm = svc.llm();
+    Json(LlmInfo { provider: llm.map(|l| l.provider()), model: llm.map(|l| l.model().to_string()), enabled: llm.is_some() })
+}
+
+/// What a test prompt got back.
+#[derive(Serialize, ToSchema)]
+struct LlmOutcome {
+    ok: bool,
+    /// Why it failed; never contains the key.
+    error: Option<String>,
+}
+
+#[utoipa::path(
+    post, path = "/api/llm/test",
+    responses((status = 200, description = "A tiny prompt was sent to the provider; `ok` says whether it answered", body = LlmOutcome))
+)]
+async fn test_llm(_: crate::Admin, Extension(svc): Extension<Arc<ImportService>>) -> Json<LlmOutcome> {
+    let r = match svc.llm() {
+        Some(l) => l.test().await,
+        None => Err(Error::Validation("no LLM is configured (set LLM_PROVIDER)".into())),
+    };
+    Json(LlmOutcome { ok: r.is_ok(), error: r.err().map(|e| e.to_string()) })
+}
+
+#[utoipa::path(
+    post, path = "/api/recipes/{id}/nutrition/estimate", params(("id" = i64, Path, description = "Recipe id")),
+    responses(
+        (status = 200, description = "The LLM's guess per serving. Nothing is saved; put the numbers in the recipe with PUT", body = crate::NutritionEstimate),
+        (status = 404, description = "No such recipe", body = ErrorBody),
+        (status = 422, description = "No LLM is configured, or it failed", body = ErrorBody),
+    )
+)]
+async fn nutrition_estimate(State(db): State<Db>, Extension(svc): Extension<Arc<ImportService>>, Path(id): Path<i64>) -> Result<Json<crate::NutritionEstimate>, Error> {
+    Ok(Json(crate::web::estimate_recipe(&db, &svc, id).await?))
+}
+
 /// What every handler can reach: the database and the content-addressed images dir.
 #[derive(Clone)]
 pub struct AppState {
@@ -564,6 +611,9 @@ pub fn router_with_auth(state: AppState, import: ImportService, auth: crate::Aut
         .route("/api/webhooks", get(list_webhooks).post(create_webhook))
         .route("/api/webhooks/{id}", get(get_webhook).put(put_webhook).delete(delete_webhook))
         .route("/api/webhooks/{id}/test", post(test_webhook))
+        .route("/api/llm", get(get_llm))
+        .route("/api/llm/test", post(test_llm))
+        .route("/api/recipes/{id}/nutrition/estimate", post(nutrition_estimate))
         .route("/api/openapi.json", get(openapi))
         .route("/api/me", get(crate::login::me))
         .route("/api/users", get(crate::login::list_users))

@@ -180,8 +180,52 @@ impl Importer for Exec {
     }
 }
 
+/// Asks the configured LLM for a Recipe JSON-LD object from the page's visible text.
+pub struct LlmImporter(pub std::sync::Arc<crate::Llm>);
+
+const LLM_SYSTEM: &str = "You read the text of a web page and extract the recipe on it as a schema.org Recipe JSON-LD object: \
+@type Recipe, name, description, recipeIngredient (array of strings, one per ingredient line), recipeInstructions (array of step strings), \
+and optionally image, keywords, recipeCategory and nutrition. Copy the page's wording; never invent. If the page has no recipe, reply {}.";
+const LLM_HINT: &str = r#"{"@type":"Recipe","name":"","description":"","recipeIngredient":[],"recipeInstructions":[]}"#;
+const LLM_TEXT_CAP: usize = 30_000;
+
+/// The text a reader would see: no scripts, styles or markup, whitespace collapsed, capped.
+fn visible_text(html: &str) -> String {
+    const HIDDEN: [&str; 5] = ["script", "style", "noscript", "template", "head"];
+    const INLINE: [&str; 12] = ["a", "b", "i", "em", "strong", "span", "u", "small", "sup", "sub", "abbr", "mark"];
+    let doc = Html::parse_document(html);
+    let mut out = String::new();
+    for node in doc.root_element().descendants() {
+        if let Some(t) = node.value().as_text() {
+            if !node.ancestors().any(|a| a.value().as_element().is_some_and(|e| HIDDEN.contains(&e.name()))) {
+                out.push_str(t);
+            }
+        } else if node.value().as_element().is_some_and(|e| !INLINE.contains(&e.name())) {
+            // ponytail: a boundary is only marked where a block opens, so text right after a closing block runs on.
+            out.push('\n');
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(LLM_TEXT_CAP).collect()
+}
+
+impl Importer for LlmImporter {
+    fn name(&self) -> &str {
+        "llm"
+    }
+    async fn import(&self, page: &Page) -> Result<Option<Value>> {
+        let text = visible_text(&page.html);
+        if text.is_empty() {
+            return Ok(None);
+        }
+        // The answer is untrusted: it only becomes a recipe through `map_jsonld`, and its URLs are never followed here.
+        let v = self.0.complete_json(LLM_SYSTEM, &text, LLM_HINT).await?;
+        Ok(find_recipe(&v).is_some().then_some(v))
+    }
+}
+
 /// Dispatch without `dyn`: the trait uses native async fn.
 pub enum AnyImporter {
+    Llm(LlmImporter),
     JsonLd(JsonLd),
     Microdata(Microdata),
     Exec(Exec),
@@ -190,6 +234,7 @@ pub enum AnyImporter {
 impl Importer for AnyImporter {
     fn name(&self) -> &str {
         match self {
+            Self::Llm(i) => i.name(),
             Self::JsonLd(i) => i.name(),
             Self::Microdata(i) => i.name(),
             Self::Exec(i) => i.name(),
@@ -197,6 +242,7 @@ impl Importer for AnyImporter {
     }
     async fn import(&self, page: &Page) -> Result<Option<Value>> {
         match self {
+            Self::Llm(i) => i.import(page).await,
             Self::JsonLd(i) => i.import(page).await,
             Self::Microdata(i) => i.import(page).await,
             Self::Exec(i) => i.import(page).await,
@@ -211,6 +257,11 @@ impl Chain {
     /// `importers` is the comma list from `MEALIER_IMPORTERS`; `exec` the JSON argv arrays
     /// from `MEALIER_EXEC_IMPORTERS`, placed where `exec` appears in the list.
     pub fn build(importers: &str, exec: Option<&str>) -> std::result::Result<Chain, String> {
+        Self::build_with(importers, exec, None)
+    }
+
+    /// `build`, with the LLM the `llm` importer needs; naming `llm` without one is an error.
+    pub fn build_with(importers: &str, exec: Option<&str>, llm: Option<std::sync::Arc<crate::Llm>>) -> std::result::Result<Chain, String> {
         let execs: Vec<Vec<String>> = match exec.filter(|s| !s.trim().is_empty()) {
             Some(s) => serde_json::from_str(s).map_err(|e| format!("MEALIER_EXEC_IMPORTERS must be a JSON array of argv arrays: {e}"))?,
             None => Vec::new(),
@@ -224,7 +275,7 @@ impl Chain {
                 "jsonld" => v.push(AnyImporter::JsonLd(JsonLd)),
                 "microdata" => v.push(AnyImporter::Microdata(Microdata)),
                 "exec" => v.extend(execs.iter().cloned().map(|a| AnyImporter::Exec(Exec::new(a)))),
-                // step 9: llm importer
+                "llm" => v.push(AnyImporter::Llm(LlmImporter(llm.clone().ok_or("MEALIER_IMPORTERS names 'llm' but no LLM is configured (LLM_PROVIDER)")?))),
                 other => return Err(format!("MEALIER_IMPORTERS: unknown importer '{other}'")),
             }
         }
@@ -247,6 +298,7 @@ impl Chain {
 pub struct ImportService {
     fetcher: Fetcher,
     chain: Chain,
+    llm: Option<std::sync::Arc<crate::Llm>>,
 }
 
 impl Default for ImportService {
@@ -257,28 +309,51 @@ impl Default for ImportService {
 
 impl ImportService {
     pub fn new(fetcher: Fetcher, chain: Chain) -> Self {
-        ImportService { fetcher, chain }
+        ImportService { fetcher, chain, llm: None }
+    }
+
+    /// The LLM behind parsing fallback, nutrition estimates and the settings page.
+    pub fn with_llm(mut self, llm: std::sync::Arc<crate::Llm>) -> Self {
+        self.llm = Some(llm);
+        self
+    }
+
+    pub fn llm(&self) -> Option<&crate::Llm> {
+        self.llm.as_deref()
     }
 
     pub fn from_env() -> std::result::Result<Self, String> {
-        let list = std::env::var("MEALIER_IMPORTERS").unwrap_or_else(|_| "jsonld,microdata".into());
+        let llm = crate::Llm::from_env().map_err(|e| e.to_string())?.map(std::sync::Arc::new);
+        let default = if llm.is_some() { "jsonld,microdata,llm" } else { "jsonld,microdata" };
+        let list = std::env::var("MEALIER_IMPORTERS").unwrap_or_else(|_| default.into());
         let exec = std::env::var("MEALIER_EXEC_IMPORTERS").ok();
-        Ok(Self::new(Fetcher::default(), Chain::build(&list, exec.as_deref())?))
+        let svc = Self::new(Fetcher::default(), Chain::build_with(&list, exec.as_deref(), llm.clone())?);
+        Ok(match llm {
+            Some(l) => svc.with_llm(l),
+            None => svc,
+        })
     }
 
     pub async fn import(&self, db: &Db, images_dir: &Path, url: &str) -> Result<Recipe> {
+        Ok(self.import_suggested(db, images_dir, url).await?.0)
+    }
+
+    /// `import`, plus the indices of the ingredient lines the LLM filled in (for the review screen).
+    pub async fn import_suggested(&self, db: &Db, images_dir: &Path, url: &str) -> Result<(Recipe, Vec<usize>)> {
         self.import_inner(db, images_dir, url).await.inspect_err(|e| {
             db.notify(crate::Event::ImportFailed { url: url.into(), reason: e.to_string() });
             eprintln!("mealier: import_failed url={url} reason={e}");
         })
     }
 
-    async fn import_inner(&self, db: &Db, images_dir: &Path, url: &str) -> Result<Recipe> {
+    async fn import_inner(&self, db: &Db, images_dir: &Path, url: &str) -> Result<(Recipe, Vec<usize>)> {
         let f = self.fetcher.get(url).await?;
         let page = Page { url: url.into(), final_url: f.final_url.to_string(), html: String::from_utf8_lossy(&f.body).into_owned() };
         let ld = self.chain.run(&page).await.ok_or_else(|| Error::Validation("no recipe found on that page".into()))?;
         let (units, foods) = (db.units().await?, db.foods().await?);
-        let (input, image) = map_jsonld(&ld, &page.final_url, &units, &foods).ok_or_else(|| Error::Validation("no recipe found on that page".into()))?;
+        let (mut input, image) = map_jsonld(&ld, &page.final_url, &units, &foods).ok_or_else(|| Error::Validation("no recipe found on that page".into()))?;
+        let all = vec![true; input.ingredients.len()];
+        let suggested = self.fill_lines(&mut input.ingredients, &all, &units, &foods).await;
         let recipe = db.create_recipe(input).await?;
         if let Some(img) = image {
             // A missing or bad image never fails the import.
@@ -286,7 +361,20 @@ impl ImportService {
                 eprintln!("mealier: import image skipped url={img} reason={e}");
             }
         }
-        Ok(recipe)
+        Ok((recipe, suggested))
+    }
+
+    /// The parsing fallback for the lines flagged in `eligible`; returns the indices the LLM filled.
+    /// Lines not flagged (ones a person already reviewed) are never sent.
+    pub(crate) async fn fill_lines(&self, lines: &mut [IngredientInput], eligible: &[bool], units: &[Unit], foods: &[Food]) -> Vec<usize> {
+        let Some(llm) = self.llm() else { return Vec::new() };
+        let idx: Vec<usize> = (0..lines.len()).filter(|&i| eligible[i]).collect();
+        let mut sub: Vec<IngredientInput> = idx.iter().map(|&i| lines[i].clone()).collect();
+        let filled = crate::fill_unparsed(llm, &mut sub, units, foods).await;
+        for &j in &filled {
+            lines[idx[j]] = sub[j].clone();
+        }
+        filled.into_iter().map(|j| idx[j]).collect()
     }
 
     async fn attach_image(&self, db: &Db, dir: &Path, recipe_id: i64, url: &str) -> Result<()> {
@@ -362,7 +450,7 @@ fn first_image(v: &Value) -> Option<String> {
 }
 
 /// "250 calories", "12.5 g", 12 -> the first number in it.
-fn first_number(v: &Value) -> Option<f64> {
+pub(crate) fn first_number(v: &Value) -> Option<f64> {
     match v {
         Value::Number(n) => n.as_f64(),
         Value::String(s) => {

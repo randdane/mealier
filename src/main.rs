@@ -52,6 +52,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
     eprintln!("mealier listening on {}", listener.local_addr()?);
     let import = ImportService::from_env()?;
+    match import.llm() {
+        Some(l) => eprintln!("mealier llm: {:?} {}", l.provider(), l.model()),
+        None => eprintln!("mealier llm: off"),
+    }
     let auth = AuthConfig::from_env()?;
     eprintln!(
         "mealier sign-in: oidc {}, local admin {}, cookies {}",

@@ -11,7 +11,7 @@
       <tr>
         <td data-label="Original">
           <input type="hidden" name="original_text" value="{{ r.original }}">{{ r.original }}
-          <span class="badge">{{ r.confidence }}</span>
+          <span class="badge">{{ r.confidence }}</span>{% if r.suggested %} <span class="badge">suggested</span>{% endif %}
         </td>
         <td data-label="Amount" class="actual">
           <input type="number" name="qty_min" value="{{ r.qty_min }}" step="any" min="0" inputmode="decimal" aria-label="Amount">

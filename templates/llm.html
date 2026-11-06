@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}LLM - mealier{% endblock %}
+{% block content %}
+<h1>LLM</h1>
+{% if !msg.is_empty() %}<p role="status">{{ msg }}</p>{% endif %}
+{% if enabled %}
+<p>Provider: <strong>{{ provider }}</strong> · Model: <strong>{{ model }}</strong></p>
+<p>The key is read from its file at startup and is never shown.</p>
+<form method="post" action="/settings/llm/test"><button type="submit">Test</button></form>
+{% else %}
+<p>LLM features are not configured. Set <code>LLM_PROVIDER</code>, <code>LLM_MODEL</code> and <code>LLM_API_KEY_FILE</code> and restart.</p>
+{% endif %}
+{% endblock %}

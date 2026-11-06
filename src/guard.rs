@@ -127,7 +127,7 @@ fn is_public(path: &str) -> bool {
 
 /// Belt over the router: the admin-only areas are refused here even if a handler forgets `Admin`.
 fn is_admin_area(path: &str) -> bool {
-    ["/api/webhooks", "/settings/webhooks", "/api/users", "/settings/users"].iter().any(|p| path == *p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
+    ["/api/webhooks", "/settings/webhooks", "/api/users", "/settings/users", "/api/llm", "/settings/llm"].iter().any(|p| path == *p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
 }
 
 pub(crate) fn session_cookie_value(headers: &HeaderMap) -> Option<&str> {
