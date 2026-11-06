@@ -239,9 +239,8 @@ recipes; no value is ever spliced into SQL. Supported: `tags`, `recipe_category`
 `<>`, `<`, `<=`, `>`, `>=` against a `YYYY-MM-DD` date, and `IS [NOT] NULL`;
 `rating` with the same comparisons against a number; `AND`, `OR` (AND binds
 tighter) and parentheses; keywords and field spellings are case-insensitive.
-`lastMade` and `rating` read the caller's household's done batches (rating is
-their average; per-user ratings now exist, and switching `rating` to the caller's own is still
-to do, because it changes `tests/filter.rs`); `dateAdded` is the
+`lastMade` reads the caller's household's done batches; `rating` is the caller's
+own rating, as in Mealie; `dateAdded` is the
 first snapshot's day, `dateUpdated` the current one's. An empty filter selects
 every recipe. Anything else is an error naming the token: the API and forms
 refuse it (422); the importer keeps the string verbatim, stores no parsed form
@@ -531,10 +530,9 @@ Remaining, in order:
 
 14. Recipe features. Part A done (2026-11-06): assets, notes, sections, ingredient
     links, substitutions, extras, settings and their importer mapping. Part B done
-    (2026-11-06, not committed): favourites and ratings, recipe actions, foods on hand and tools
-    owned, share links, and their importer mapping. One item is open: `filter.rs` `rating` still
-    averages the household's batch ratings, because reading the caller's own rating changes an
-    assertion in `tests/filter.rs` (`last_made_and_rating_read_the_callers_household`).
+    (2026-11-06): favourites and ratings, recipe actions, foods on hand and tools
+    owned, share links, and their importer mapping. Filter `rating` reads the caller's own rating
+    (owner approved rewriting `tests/filter.rs::last_made_and_rating_read_the_callers_household`).
 15. Notifier events and scheduled webhooks.
 16. Fixture and importer coverage for every mapped table.
 17. Deploy (`stacks/mealier`).
@@ -543,12 +541,9 @@ Remaining, in order:
 
 2026-11-06.
 
-- Phase: step 14 parts A and B done, not committed; 556 tests pass (1 ignored, needs a real
-  Mealie backup), clippy clean with `-D warnings`.
-- In flight: nothing. No agents or servers running.
-- Blocked on the owner: the `filter.rs` `rating` switch to the caller's own rating, which changes
-  an existing assertion in `tests/filter.rs`; and, until deploy, step 17 (a GitHub repo, an Authentik
-  application, and secrets).
+- Phase: step 14 done and committed; step 15 in progress.
+- Blocked on the owner: nothing until step 17 (a GitHub repo, an Authentik application, and
+  secrets).
 - Next: 15–16 without stopping unless a decision is needed.
 - Production Mealie still holds the `mealier-fixture` items and three extra
   backups; `scripts/cleanup-mealie-fixture.py` removes the items after step 16

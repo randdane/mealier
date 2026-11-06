@@ -475,9 +475,10 @@ impl Field {
                 binds.push(Bind::Int(sc.household_id));
                 "(SELECT max(b.made_on) FROM batches b WHERE b.recipe_id = r.id AND b.household_id = ? AND b.status = 'done')"
             }
+            // Mealie semantics: the caller's own rating, not the batches'.
             Field::Rating => {
-                binds.push(Bind::Int(sc.household_id));
-                "(SELECT avg(b.rating) FROM batches b WHERE b.recipe_id = r.id AND b.household_id = ? AND b.status = 'done')"
+                binds.push(Bind::Int(sc.user_id));
+                "(SELECT u.rating FROM user_recipes u WHERE u.recipe_id = r.id AND u.user_id = ?)"
             }
             Field::DateAdded => "(SELECT substr(min(x.created_at), 1, 10) FROM recipe_snapshots x WHERE x.recipe_id = r.id)",
             Field::DateUpdated => "substr(s.created_at, 1, 10)",
@@ -600,7 +601,7 @@ impl Sel {
 }
 
 impl Db {
-    /// The caller's group's live recipes matching `filter`, by name. `lastMade` and `rating` read the caller's household's batches.
+    /// The caller's group's live recipes matching `filter`, by name. `lastMade` reads the caller's household's done batches; `rating` is the caller's own rating.
     pub async fn filter_recipes(&self, sc: &Scope, filter: &Filter) -> Result<Vec<RecipeSummary>> {
         self.select_recipes(sc, &[Sel::Filter(filter.clone())]).await
     }

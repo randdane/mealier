@@ -180,6 +180,21 @@ async fn names(w: &Set, src: &str) -> Vec<String> {
     names_as(w, &w.a, src).await
 }
 
+async fn recipe_id(w: &Set, name: &str) -> i64 {
+    sqlx::query_scalar("SELECT id FROM recipes WHERE group_id = ? AND name = ?").bind(w.a.group_id).bind(name).fetch_one(w.db.pool()).await.unwrap()
+}
+
+async fn user_in(w: &Set, sc: &Scope, name: &str) -> i64 {
+    sqlx::query_scalar("INSERT INTO users (username, email, full_name, role, household_id) VALUES (?, ?, ?, 'user', ?) RETURNING id")
+        .bind(name)
+        .bind(format!("{name}@example.invalid"))
+        .bind(name)
+        .bind(sc.household_id)
+        .fetch_one(w.db.pool())
+        .await
+        .unwrap()
+}
+
 async fn names_as(w: &Set, sc: &Scope, src: &str) -> Vec<String> {
     let f = ok(src);
     w.db.filter_recipes(sc, &f).await.unwrap().into_iter().map(|r| r.name).collect()
@@ -234,12 +249,20 @@ async fn last_made_and_rating_read_the_callers_household() {
     assert_eq!(names(&w, r#"lastMade > "2026-02-15""#).await, ["Tomato Soup"]);
     assert_eq!(names(&w, r#"lastMade <= "2026-02-10""#).await, ["Pancakes"]);
     assert_eq!(names(&w, r#"lastMade = "2026-03-01""#).await, ["Tomato Soup"]);
-    assert_eq!(names(&w, "rating >= 4").await, ["Pancakes"]);
-    assert_eq!(names(&w, "rating < 4").await, Vec::<String>::new());
-    assert_eq!(names(&w, "rating IS NULL").await, ["Beef Stew", "Salad", "Tomato Soup"]);
-    // household b made the stew and rated it 1; for them the pancakes were never made
-    assert_eq!(names_as(&w, &w.b, "lastMade IS NOT NULL").await, ["Beef Stew"]);
-    assert_eq!(names_as(&w, &w.b, "rating <= 1").await, ["Beef Stew"]);
+    // `rating` is the caller's own rating (Mealie semantics), not the batches' average:
+    // household a's batches average 4 for the pancakes, but this user rates them 2.
+    let pancakes = recipe_id(&w, "Pancakes").await;
+    let salad = recipe_id(&w, "Salad").await;
+    let ann = Scope { user_id: user_in(&w, &w.a, "ann").await, ..w.a };
+    let bob = Scope { user_id: user_in(&w, &w.b, "bob").await, ..w.b };
+    w.db.set_rating(&ann, pancakes, Some(2.0)).await.unwrap();
+    w.db.set_rating(&bob, salad, Some(1.0)).await.unwrap();
+    assert_eq!(names_as(&w, &ann, "rating >= 4").await, Vec::<String>::new());
+    assert_eq!(names_as(&w, &ann, "rating < 4").await, ["Pancakes"]);
+    assert_eq!(names_as(&w, &ann, "rating IS NULL").await, ["Beef Stew", "Salad", "Tomato Soup"]);
+    // household b made the stew and rated that batch 1, but b's user rated only the salad
+    assert_eq!(names_as(&w, &bob, "lastMade IS NOT NULL").await, ["Beef Stew"]);
+    assert_eq!(names_as(&w, &bob, "rating <= 1").await, ["Salad"]);
 }
 
 #[tokio::test]
