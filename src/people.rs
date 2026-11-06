@@ -31,6 +31,7 @@ pub struct User {
     pub oidc_issuer: Option<String>,
     pub oidc_subject: Option<String>,
     pub disabled: bool,
+    pub cook_theme: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
@@ -107,6 +108,9 @@ impl Image {
     }
 }
 
+/// The values `users.cook_theme` accepts (its CHECK says the same).
+pub const COOK_THEMES: [&str; 3] = ["normal", "high-contrast", "max-white"];
+
 fn names(json: &str) -> Vec<String> {
     serde_json::from_str(json).unwrap_or_default()
 }
@@ -133,7 +137,7 @@ impl Db {
     }
 
     pub async fn users(&self) -> Result<Vec<User>> {
-        let rows = sqlx::query("SELECT id, username, email, full_name, role, oidc_issuer, oidc_subject, disabled FROM users ORDER BY id")
+        let rows = sqlx::query("SELECT id, username, email, full_name, role, oidc_issuer, oidc_subject, disabled, cook_theme FROM users ORDER BY id")
             .fetch_all(&self.pool)
             .await?;
         Ok(rows
@@ -147,8 +151,20 @@ impl Db {
                 oidc_issuer: r.get(5),
                 oidc_subject: r.get(6),
                 disabled: r.get(7),
+                cook_theme: r.get(8),
             })
             .collect())
+    }
+
+    pub async fn set_cook_theme(&self, user_id: i64, theme: &str) -> Result<()> {
+        if !COOK_THEMES.contains(&theme) {
+            return Err(Error::Validation(format!("cook theme must be one of {}", COOK_THEMES.join(", "))));
+        }
+        let n = sqlx::query("UPDATE users SET cook_theme = ? WHERE id = ?").bind(theme).bind(user_id).execute(&self.pool).await?.rows_affected();
+        if n == 0 {
+            return Err(Error::NotFound("user"));
+        }
+        Ok(())
     }
 
     /// Newest first; undated (planned) batches lead.

@@ -35,3 +35,19 @@ th, td { text-align: left; padding: .4rem .3rem; border-bottom: 1px solid var(--
   table.lines td::before { content: attr(data-label) ": "; color: var(--muted); font-size: .85rem; }
   .actual { white-space: normal; }
 }
+
+/* Cook mode */
+.cook { font-size: 1.6rem; line-height: 1.5; }
+.cook main { max-width: 44rem; }
+.cook h1 { font-size: 2.2rem; }
+.cook h2 { font-size: 1.6rem; }
+.cook ul, .cook ol { padding-left: 0; list-style: none; }
+.cook li { margin: .6rem 0; }
+.cook ol.steps label { display: flex; align-items: flex-start; margin: 0; padding: .5rem 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+.cook ol.steps input { width: 2rem; height: 2rem; flex: none; accent-color: var(--accent); }
+.cook ol.steps input:checked + span { text-decoration: line-through; }
+.cook .theme { font-size: 1rem; margin-top: 2rem; }
+.cook-high-contrast { --bg: #000; --fg: #fff; --muted: #fff; --line: #fff; --accent: #ffe14d; --field: #000; font-size: 1.9rem; font-weight: 700; }
+.cook-max-white { --bg: #fff; --fg: #000; --muted: #000; --line: #000; --accent: #000; --field: #fff; color-scheme: light; font-weight: 900; }
+.cook-max-white a { text-decoration: underline; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

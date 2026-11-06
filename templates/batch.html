@@ -2,7 +2,7 @@
 {% block title %}Batch of {{ recipe_name }} - mealier{% endblock %}
 {% block content %}
 <h1><a href="/recipes/{{ recipe_id }}">{{ recipe_name }}</a>, batch {{ id }}</h1>
-<p><span class="badge">{{ status }}</span></p>
+<p><span class="badge">{{ status }}</span> <a href="/recipes/{{ recipe_id }}/cook?batch={{ id }}">Cook</a></p>
 
 <form method="post" action="/batches/{{ id }}" hx-boost="true">
   <div class="fields">

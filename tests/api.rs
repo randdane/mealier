@@ -443,3 +443,46 @@ async fn post_batch_photos_missing_batch_returns_404() {
     let (status, _) = upload(&app, "/api/batches/999/photos", "photo", PNG).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+async fn raw(app: &Router, method: &str, uri: &str, form: Option<&str>) -> (StatusCode, axum::http::HeaderMap, String) {
+    let mut req = Request::builder().method(method).uri(uri);
+    let body = match form {
+        Some(f) => {
+            req = req.header("content-type", "application/x-www-form-urlencoded");
+            Body::from(f.to_string())
+        }
+        None => Body::empty(),
+    };
+    let resp = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
+    let (status, headers) = (resp.status(), resp.headers().clone());
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+#[tokio::test]
+async fn cook_page_shows_every_step_scaled_ingredients_and_requests_a_wake_lock() {
+    let app = router_for(Db::open_memory().await.unwrap());
+    let (_, r) = send(&app, "POST", "/api/recipes", Some(json!({"name": "Soup", "steps": ["Chop the onion", "Simmer 20 min"], "ingredients": [{"original_text": "2 onions", "qty_min": 2.0, "qty_max": 2.0}]}))).await;
+    let uri = format!("/recipes/{}/cook?scale=3", r["id"]);
+    let (status, _, html) = raw(&app, "GET", &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Chop the onion") && html.contains("Simmer 20 min"), "{html}");
+    assert!(html.contains("navigator.wakeLock.request('screen')"));
+    assert!(html.contains("<li>6</li>"), "scaled amount missing: {html}");
+    assert!(html.contains("cook-normal"));
+}
+
+#[tokio::test]
+async fn cook_theme_post_rejects_unknown_themes_and_sets_the_cookie_for_known_ones() {
+    let app = router_for(Db::open_memory().await.unwrap());
+    let (status, _, _) = raw(&app, "POST", "/settings/cook-theme", Some("theme=neon&back=%2F")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (status, headers, _) = raw(&app, "POST", "/settings/cook-theme", Some("theme=max-white&back=%2Frecipes%2F1%2Fcook")).await;
+    assert!(status.is_redirection());
+    assert_eq!(headers["location"], "/recipes/1/cook");
+    assert!(headers["set-cookie"].to_str().unwrap().starts_with("cook_theme=max-white;"));
+
+    let (_, headers, _) = raw(&app, "POST", "/settings/cook-theme", Some("theme=normal&back=%2F%2Fevil.example")).await;
+    assert_eq!(headers["location"], "/");
+}

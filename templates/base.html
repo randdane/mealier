@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/htmx.min.js" defer></script>
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
 <header><a href="/">mealier</a></header>
 <main>
 {% block content %}{% endblock %}

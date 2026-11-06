@@ -4,6 +4,8 @@
 <h1>{{ name }}</h1>
 {% if !description.is_empty() %}<p>{{ description }}</p>{% endif %}
 
+<p><a href="/recipes/{{ id }}/cook">Cook</a></p>
+
 <h2>Ingredients</h2>
 <ul>
 {% for i in ingredients %}<li>{{ i }}</li>{% endfor %}

@@ -15,6 +15,8 @@ pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(index))
         .route("/recipes/{id}", get(recipe_page))
+        .route("/recipes/{id}/cook", get(cook_page))
+        .route("/settings/cook-theme", post(set_theme))
         .route("/recipes/{id}/batches", post(start))
         .route("/batches/{id}", get(batch_page).post(save))
         .route("/batches/{id}/lines", post(add_line))
@@ -87,17 +89,7 @@ struct RecipePage {
 
 async fn recipe_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<RecipePage> {
     let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
-    let ingredients = r
-        .content
-        .ingredients
-        .iter()
-        .map(|i| {
-            let what = [i.food_name.as_deref().unwrap_or_default(), &i.note];
-            let what = what.iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(", ");
-            let line = [amount(i.qty_min, i.qty_max, i.unit_name.as_deref()), what].join(" ");
-            if line.trim().is_empty() { i.original_text.clone() } else { line.trim().to_string() }
-        })
-        .collect();
+    let ingredients = r.content.ingredients.iter().map(|i| ingredient_line(i, 1.0)).collect();
     let batches = db
         .list_batches(id)
         .await?
@@ -111,6 +103,105 @@ async fn recipe_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<Recipe
         })
         .collect();
     Ok(RecipePage { id, name: r.content.name, description: r.content.description, ingredients, steps: r.content.steps, batches })
+}
+
+/// One ingredient as text, amounts times `scale`; falls back to the original text.
+fn ingredient_line(i: &crate::Ingredient, scale: f64) -> String {
+    let what = [i.food_name.as_deref().unwrap_or_default(), &i.note];
+    let what = what.iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(", ");
+    let q = |n: Option<f64>| n.map(|n| n * scale);
+    let line = [amount(q(i.qty_min), q(i.qty_max), i.unit_name.as_deref()), what].join(" ");
+    if line.trim().is_empty() { i.original_text.clone() } else { line.trim().to_string() }
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "cook.html")]
+struct CookPage {
+    name: String,
+    ingredients: Vec<String>,
+    steps: Vec<String>,
+    theme: String,
+    /// Where "back" goes, and where the theme form returns to.
+    back: String,
+    here: String,
+    themes: [&'static str; 3],
+}
+
+#[derive(Deserialize)]
+struct CookQuery {
+    scale: Option<f64>,
+    batch: Option<i64>,
+}
+
+fn cookie_theme(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|c| c.trim().strip_prefix("cook_theme="))
+        .find(|t| crate::COOK_THEMES.contains(t))
+        .unwrap_or("normal")
+        .to_string()
+}
+
+async fn cook_page(
+    State(db): State<Db>,
+    Path(id): Path<i64>,
+    Query(q): Query<CookQuery>,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+) -> Result<CookPage> {
+    let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
+    let scale = q.scale.unwrap_or(1.0);
+    if !(scale.is_finite() && scale > 0.0) {
+        return Err(Error::Validation("scale must be a positive number".into()));
+    }
+    let (ingredients, back) = match q.batch {
+        Some(bid) => {
+            let b = db.get_batch(bid).await?;
+            if b.batch.recipe_id != id {
+                return Err(Error::NotFound("batch"));
+            }
+            let lines = b
+                .lines
+                .iter()
+                .map(|l| {
+                    let sub = if l.substitution.is_empty() { String::new() } else { format!(" (instead: {})", l.substitution) };
+                    let line = [amount(l.qty_min, l.qty_max, l.unit_name.as_deref()), l.ingredient.clone()];
+                    format!("{}{sub}", line.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "))
+                })
+                .collect();
+            (lines, format!("/batches/{bid}"))
+        }
+        None => (r.content.ingredients.iter().map(|i| ingredient_line(i, scale)).collect(), format!("/recipes/{id}")),
+    };
+    Ok(CookPage {
+        name: r.content.name,
+        ingredients,
+        steps: r.content.steps,
+        // step 8: read from the signed-in user's cook_theme
+        theme: cookie_theme(&headers),
+        back,
+        here: uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default(),
+        themes: crate::COOK_THEMES,
+    })
+}
+
+#[derive(Deserialize)]
+struct ThemeForm {
+    theme: String,
+    back: String,
+}
+
+async fn set_theme(axum::Form(f): axum::Form<ThemeForm>) -> Result<impl IntoResponse> {
+    if !crate::COOK_THEMES.contains(&f.theme.as_str()) {
+        return Err(Error::Validation(format!("cook theme must be one of {}", crate::COOK_THEMES.join(", "))));
+    }
+    // Same-site paths only, so this cannot bounce a browser elsewhere.
+    let back = if f.back.starts_with('/') && !f.back.starts_with("//") && !f.back.contains('\\') { f.back } else { "/".into() };
+    let cookie = format!("cook_theme={}; Path=/; Max-Age=31536000; SameSite=Lax", f.theme);
+    Ok(([(header::SET_COOKIE, cookie)], Redirect::to(&back)))
 }
 
 #[derive(Deserialize)]
