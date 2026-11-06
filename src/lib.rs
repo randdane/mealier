@@ -1,5 +1,6 @@
 use std::path::Path;
 
+pub mod api;
 mod recipes;
 pub use recipes::*;
 

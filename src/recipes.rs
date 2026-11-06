@@ -11,7 +11,8 @@ pub struct Nutrition {
     pub carbs_g: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct IngredientInput {
     pub qty_min: Option<f64>,
     pub qty_max: Option<f64>,
@@ -21,7 +22,8 @@ pub struct IngredientInput {
     pub original_text: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct RecipeInput {
     pub name: String,
     pub description: String,
@@ -63,7 +65,7 @@ pub struct Content {
     pub steps: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Recipe {
     pub id: i64,
     pub archived: bool,
@@ -79,21 +81,21 @@ pub struct Recipe {
     pub steps: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RecipeSummary {
     pub id: i64,
     pub name: String,
     pub archived: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SnapshotSummary {
     pub id: i64,
     pub recipe_id: i64,
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Snapshot {
     pub id: i64,
     pub recipe_id: i64,
@@ -366,6 +368,10 @@ impl Db {
             .bind(recipe_id)
             .fetch_all(&self.pool)
             .await?;
+        // Every recipe has at least one snapshot, so none means no such recipe.
+        if rows.is_empty() {
+            return Err(Error::NotFound("recipe"));
+        }
         Ok(rows
             .iter()
             .map(|r| SnapshotSummary { id: r.get(0), recipe_id, created_at: r.get(1) })
