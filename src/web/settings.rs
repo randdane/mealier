@@ -22,6 +22,11 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/settings/labels", get(labels_page).post(label_create))
         .route("/settings/labels/{id}", post(label_update))
         .route("/settings/labels/{id}/delete", post(label_delete))
+        .route("/pantry", get(pantry_page))
+        .route("/pantry/foods/{id}", post(pantry_food))
+        .route("/pantry/tools/{id}", post(pantry_tool))
+        .route("/settings/actions", get(actions_page).post(action_create))
+        .route("/settings/actions/{id}/delete", post(action_delete))
         .route("/settings/llm", get(llm_page))
         .route("/settings/llm/test", post(llm_test))
 }
@@ -153,4 +158,58 @@ async fn llm_test(_: crate::Admin, axum::Extension(svc): Svc) -> LlmPage {
         },
     };
     llm_view(&svc, msg)
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "pantry.html")]
+struct PantryPage {
+    pantry: crate::Pantry,
+}
+
+async fn pantry_page(sc: Scope, State(db): State<Db>) -> Result<PantryPage> {
+    Ok(PantryPage { pantry: db.pantry(&sc).await? })
+}
+
+#[derive(Deserialize)]
+struct HaveForm {
+    #[serde(default)]
+    have: String,
+}
+
+async fn pantry_food(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<HaveForm>) -> Result<Redirect> {
+    db.set_food_on_hand(&sc, id, f.have == "1").await?;
+    Ok(Redirect::to("/pantry"))
+}
+
+async fn pantry_tool(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<HaveForm>) -> Result<Redirect> {
+    db.set_tool_owned(&sc, id, f.have == "1").await?;
+    Ok(Redirect::to("/pantry"))
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "actions.html")]
+struct ActionsPage {
+    actions: Vec<crate::RecipeAction>,
+    admin: bool,
+}
+
+async fn actions_page(sc: Scope, State(db): State<Db>) -> Result<ActionsPage> {
+    Ok(ActionsPage { actions: db.actions(&sc).await?, admin: sc.admin })
+}
+
+#[derive(Deserialize)]
+struct ActionForm {
+    title: String,
+    kind: String,
+    url: String,
+}
+
+async fn action_create(sc: Scope, State(db): State<Db>, axum::Form(f): axum::Form<ActionForm>) -> Result<Redirect> {
+    db.create_action(&sc, crate::ActionInput { title: f.title, kind: f.kind, url: f.url }).await?;
+    Ok(Redirect::to("/settings/actions"))
+}
+
+async fn action_delete(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
+    db.delete_action(&sc, id).await?;
+    Ok(Redirect::to("/settings/actions"))
 }

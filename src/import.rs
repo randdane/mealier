@@ -41,6 +41,13 @@ pub struct ImportReport {
     pub images: usize,
     /// Recipe attachments stored.
     pub assets: usize,
+    /// Rows of favourites (users' `is_favorite`), and of ratings kept (half stars).
+    pub favourites: usize,
+    pub ratings: usize,
+    pub recipe_actions: usize,
+    pub foods_on_hand: usize,
+    pub tools_owned: usize,
+    pub share_links: usize,
     /// Records the importer left out, one line each.
     pub skipped: Vec<String>,
 }
@@ -182,6 +189,7 @@ pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Res
     import_cookbooks(&mut tx, &b, &mut report).await?;
     import_rules(&mut tx, &b, &mut report).await?;
     import_shopping(&mut tx, &b, &mut report).await?;
+    import_household_features(&mut tx, &b, &mut report).await?;
     let files = import_images(&mut tx, &images, &mut report).await?;
     if let Some(g) = home {
         retire_home(&mut tx, g).await?;
@@ -919,6 +927,109 @@ async fn import_shopping(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport)
     }
     if !b.rows("shopping_list_recipe_reference").is_empty() {
         report.skipped.push("shopping lists' own recipe references are not imported; items keep theirs".into());
+    }
+    Ok(())
+}
+
+/// `YYYY-MM-DDTHH:MM:SS` or with a space, any fraction after it, read as UTC (Mealie's naive datetimes): `YYYY-MM-DDTHH:MM:SSZ`.
+fn utc(ts: &str) -> Option<String> {
+    let t = ts.get(..19)?;
+    let digits = |r: std::ops::Range<usize>| t.as_bytes()[r].iter().all(u8::is_ascii_digit);
+    let ok = digits(0..4) && digits(5..7) && digits(8..10) && digits(11..13) && digits(14..16) && digits(17..19) && &t[4..5] == "-" && &t[7..8] == "-" && matches!(&t[10..11], "T" | " ") && &t[13..14] == ":" && &t[16..17] == ":";
+    ok.then(|| format!("{}T{}Z", &t[..10], &t[11..]))
+}
+
+/// Favourites and ratings, recipe actions, foods on hand, tools owned and share links. Column names are
+/// from Mealie v3.28.0's models (the fixture's tables are empty): see `tests/import_part_b.rs`.
+async fn import_household_features(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
+    // A favourite or a rating belongs to a user, and the recipe must be in the user's group.
+    for r in b.rows("users_to_recipes") {
+        let (user, recipe_uuid) = (local(tx, "user", id(r, "user_id")?).await?, id(r, "recipe_id")?);
+        let recipe = local(tx, "recipe", recipe_uuid).await?;
+        let same: Option<i64> = sqlx::query_scalar("SELECT 1 FROM recipes r, users u JOIN households h ON h.id = u.household_id WHERE r.id = ? AND u.id = ? AND r.group_id = h.group_id").bind(recipe).bind(user).fetch_optional(&mut **tx).await?;
+        if same.is_none() {
+            return Err(Error::Validation("backup favourite or rating pairs a user with a recipe of another group".into()));
+        }
+        let favourite = flag(r, "is_favorite");
+        // Mealie writes 0 for "no rating"; its stars go in halves, and a stray value is brought to the nearest.
+        let rating = f(r, "rating").filter(|v| v.is_finite() && *v > 0.0).map(|v| {
+            let kept = ((v * 2.0).round() / 2.0).clamp(0.5, 5.0);
+            if kept != v {
+                report.skipped.push(format!("rating {v} of recipe {recipe_uuid} was kept as {kept}"));
+            }
+            kept
+        });
+        if !favourite && rating.is_none() {
+            continue;
+        }
+        sqlx::query("INSERT INTO user_recipes (user_id, recipe_id, is_favorite, rating) VALUES (?, ?, ?, ?) ON CONFLICT (user_id, recipe_id) DO UPDATE SET is_favorite = excluded.is_favorite, rating = excluded.rating")
+            .bind(user)
+            .bind(recipe)
+            .bind(favourite)
+            .bind(rating)
+            .execute(&mut **tx)
+            .await?;
+        report.favourites += usize::from(favourite);
+        report.ratings += usize::from(rating.is_some());
+    }
+
+    // Written as they are: an admin's post action stays one, and a link that does not come out as http(s) is simply never shown.
+    for r in b.rows("recipe_actions") {
+        let group = local(tx, "group", id(r, "group_id")?).await?;
+        let kind = s(r, "action_type").unwrap_or_default();
+        if !["link", "post"].contains(&kind) {
+            report.skipped.push(format!("recipe action {:?} has the type {kind:?}, which mealier does not have; not imported", s(r, "title").unwrap_or_default()));
+            continue;
+        }
+        let household = match local_opt(tx, "household", s(r, "household_id")).await? {
+            Some(h) => {
+                same_group(tx, "households", h, group, "recipe action's household").await?;
+                h
+            }
+            None => household_for(tx, None, group).await?,
+        };
+        sqlx::query("INSERT INTO recipe_actions (household_id, title, kind, url) VALUES (?, ?, ?, ?)").bind(household).bind(s(r, "title").unwrap_or_default()).bind(kind).bind(s(r, "url").unwrap_or_default()).execute(&mut **tx).await?;
+        report.recipe_actions += 1;
+    }
+
+    for (table, kind, owner_table, col, link, is_food) in [
+        ("households_to_ingredient_foods", "food", "foods", "food_id", "household_foods", true),
+        ("households_to_tools", "tool", "tools", "tool_id", "household_tools", false),
+    ] {
+        for r in b.rows(table) {
+            let household = local(tx, "household", id(r, "household_id")?).await?;
+            let item = local(tx, kind, id(r, col)?).await?;
+            let group: i64 = sqlx::query_scalar("SELECT group_id FROM households WHERE id = ?").bind(household).fetch_one(&mut **tx).await?;
+            same_group(tx, owner_table, item, group, &format!("{kind} on a household")).await?;
+            sqlx::query(&format!("INSERT OR IGNORE INTO {link} (household_id, {col}) VALUES (?, ?)")).bind(household).bind(item).execute(&mut **tx).await?;
+            if is_food {
+                report.foods_on_hand += 1;
+            } else {
+                report.tools_owned += 1;
+            }
+        }
+    }
+
+    // The token is Mealie's `id`; its URL spells it with dashes, so that is the form hashed.
+    for r in b.rows("recipe_share_tokens") {
+        let (group, recipe_uuid) = (local(tx, "group", id(r, "group_id")?).await?, id(r, "recipe_id")?);
+        let recipe = local(tx, "recipe", recipe_uuid).await?;
+        same_group(tx, "recipes", recipe, group, "share token's recipe").await?;
+        let raw = id(r, "id")?;
+        let Some(expires) = s(r, "expires_at").and_then(utc) else {
+            report.skipped.push(format!("share token of recipe {recipe_uuid}: expiry {:?} is not a date; not imported", s(r, "expires_at").unwrap_or_default()));
+            continue;
+        };
+        let token = if raw.len() == 32 && !raw.contains('-') { dashed(raw) } else { raw.to_string() };
+        sqlx::query("INSERT INTO share_links (group_id, recipe_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), ?)")
+            .bind(group)
+            .bind(recipe)
+            .bind(crate::hash_token(&token))
+            .bind(s(r, "created_at").and_then(utc))
+            .bind(expires)
+            .execute(&mut **tx)
+            .await?;
+        report.share_links += 1;
     }
     Ok(())
 }

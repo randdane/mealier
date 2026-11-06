@@ -137,6 +137,8 @@ struct AddToList {
     batch_id: Option<i64>,
     #[serde(default)]
     scale: String,
+    /// A checkbox: present when ticked.
+    skip_on_hand: Option<String>,
 }
 
 async fn target_list(db: &Db, sc: &Scope, f: &AddToList) -> Result<i64> {
@@ -149,7 +151,7 @@ async fn target_list(db: &Db, sc: &Scope, f: &AddToList) -> Result<i64> {
 async fn list_add_recipe(sc: Scope, State(db): State<Db>, axum::Form(f): axum::Form<AddToList>) -> Result<Redirect> {
     let list = target_list(&db, &sc, &f).await?;
     let recipe = f.recipe_id.ok_or(Error::Validation("recipe_id is required".into()))?;
-    db.add_recipe_to_list(&sc, list, recipe, number(&f.scale)?.unwrap_or(1.0)).await?;
+    db.add_recipe_to_list_with(&sc, list, recipe, number(&f.scale)?.unwrap_or(1.0), f.skip_on_hand.is_some()).await?;
     Ok(Redirect::to(&format!("/lists/{list}")))
 }
 

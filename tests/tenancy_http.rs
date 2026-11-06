@@ -104,6 +104,12 @@ struct Ids {
     sub: i64,
     /// The sha256 of an asset attached to `recipe`.
     asset: String,
+    /// A link action of household Alpha.
+    action: i64,
+    /// A tool of group One.
+    tool: i64,
+    /// A share link of `recipe`.
+    share: i64,
 }
 
 async fn world() -> World {
@@ -129,8 +135,11 @@ async fn world() -> World {
     let food2 = db.add_food(&t.a, "butter").await.unwrap();
     let sub = db.add_food_substitution(&t.a, food, mealier::SubstitutionInput { food_id: food2, note: "1:1".into() }).await.unwrap()[0].id;
     let asset = db.add_recipe_asset(&t.a, recipe.id, &images.join("assets"), "seed.txt", "Seed", "", b"seed").await.unwrap().hash;
+    let action = db.create_action(&t.a, mealier::ActionInput { title: "Look".into(), kind: "link".into(), url: "https://x.test/${id}".into() }).await.unwrap().id;
+    let tool: i64 = sqlx::query_scalar("INSERT INTO tools (group_id, name) VALUES (?, 'whisk') RETURNING id").bind(t.a.group_id).fetch_one(db.pool()).await.unwrap();
+    let share = db.create_share_link(&t.a, recipe.id, None).await.unwrap().link.id;
     let app = api::router(api::AppState { db: db.clone(), images_dir: images.clone() });
-    let ids = Ids { recipe: recipe.id, snapshot: recipe.current_snapshot_id, batch: b.batch.id, line: b.lines[0].id, entry: entry.id, list: list.id, item: item.id, unit, food, label: label.id, cookbook: cookbook.id, rule: rule.id, food2, sub, asset };
+    let ids = Ids { action, tool, share, recipe: recipe.id, snapshot: recipe.current_snapshot_id, batch: b.batch.id, line: b.lines[0].id, entry: entry.id, list: list.id, item: item.id, unit, food, label: label.id, cookbook: cookbook.id, rule: rule.id, food2, sub, asset };
     World { app, db, t, images, alice, bob, carol, ids }
 }
 
@@ -147,6 +156,9 @@ impl World {
             .replace("{food2}", &i.food2.to_string())
             .replace("{sub}", &i.sub.to_string())
             .replace("{asset}", &i.asset)
+            .replace("{action}", &i.action.to_string())
+            .replace("{tool}", &i.tool.to_string())
+            .replace("{share}", &i.share.to_string())
             .replace("{food}", &i.food.to_string())
             .replace("{label}", &i.label.to_string())
             .replace("{cookbook}", &i.cookbook.to_string())
@@ -179,6 +191,11 @@ impl World {
             "SELECT json_group_array(json_array(id, extras)) FROM foods",
             "SELECT json_group_array(json_array(id, extras)) FROM shopping_lists",
             "SELECT json_group_array(json_array(id, extras)) FROM shopping_list_items",
+            "SELECT json_group_array(json_array(user_id, recipe_id, is_favorite, rating)) FROM user_recipes",
+            "SELECT json_group_array(json_array(id, household_id, title, kind, url)) FROM recipe_actions",
+            "SELECT json_group_array(json_array(household_id, food_id)) FROM household_foods",
+            "SELECT json_group_array(json_array(household_id, tool_id)) FROM household_tools",
+            "SELECT json_group_array(json_array(id, group_id, recipe_id, token_hash, expires_at)) FROM share_links",
         ] {
             let s: String = sqlx::query_scalar(sql).fetch_one(self.db.pool()).await.unwrap();
             out.push_str(&s);
@@ -259,6 +276,21 @@ fn api_routes() -> Vec<Route> {
         r("PUT", "/api/food-substitutions/{sub}", Group, |_| Req::Json(json!({"note": "3:4"})), 200),
         r("DELETE", "/api/food-substitutions/{sub}", Spent, none, 204),
         r("PUT", "/api/shopping-lists/{list}/extras", Household, |_| Req::Json(json!({"store": "co-op"})), 204),
+        // a user's own favourite and rating: any member of the recipe's group may set theirs
+        r("GET", "/api/recipes/{recipe}/mine", Group, none, 200),
+        r("PUT", "/api/recipes/{recipe}/favourite", Group, |_| Req::Json(json!({"favourite": true})), 204),
+        r("PUT", "/api/recipes/{recipe}/rating", Group, |_| Req::Json(json!({"rating": 4.5})), 204),
+        r("GET", "/api/recipes/{recipe}/actions", Group, none, 200),
+        r("PUT", "/api/recipe-actions/{action}", Household, |_| Req::Json(json!({"title": "Renamed", "kind": "link", "url": "https://x.test/"})), 200),
+        r("DELETE", "/api/recipe-actions/{action}", Household, none, 204),
+        // a link action cannot be triggered: 422 for the owner shows the route and both ids were accepted
+        r("POST", "/api/recipe-actions/{action}/trigger", Household, |i| Req::Json(json!({"recipe_id": i.recipe})), 422),
+        // which foods and tools a household has is its own; the food or tool is the group's
+        r("PUT", "/api/foods/{food}/on-hand", Group, |_| Req::Json(json!({"on_hand": true})), 204),
+        r("PUT", "/api/tools/{tool}/owned", Group, |_| Req::Json(json!({"owned": true})), 204),
+        r("GET", "/api/recipes/{recipe}/share-links", Group, none, 200),
+        r("POST", "/api/recipes/{recipe}/share-links", Group, |_| Req::Json(json!({"days": 5})), 201),
+        r("DELETE", "/api/share-links/{share}", Spent, none, 204),
     ]
 }
 
@@ -300,6 +332,14 @@ fn html_routes() -> Vec<Route> {
         r("POST", "/cookbooks/{cookbook}/delete", Spent, |_| Req::Form(String::new()), 303),
         r("POST", "/settings/rules/{rule}", Group, |_| Req::Form("day=tuesday".into()), 303),
         r("POST", "/settings/rules/{rule}/delete", Spent, |_| Req::Form(String::new()), 303),
+        r("POST", "/recipes/{recipe}/favourite", Group, |_| Req::Form("favourite=1".into()), 303),
+        r("POST", "/recipes/{recipe}/rating", Group, |_| Req::Form("rating=4".into()), 303),
+        r("POST", "/recipes/{recipe}/actions/{action}/run", Household, |_| Req::Form(String::new()), 422),
+        r("POST", "/recipes/{recipe}/share-links", Group, |_| Req::Form("days=3".into()), 200),
+        r("POST", "/recipes/{recipe}/share-links/{share}/delete", Spent, |_| Req::Form(String::new()), 303),
+        r("POST", "/pantry/foods/{food}", Group, |_| Req::Form("have=1".into()), 303),
+        r("POST", "/pantry/tools/{tool}", Group, |_| Req::Form("have=1".into()), 303),
+        r("POST", "/settings/actions/{action}/delete", Household, |_| Req::Form(String::new()), 303),
     ]
 }
 
@@ -446,6 +486,8 @@ async fn ids_in_request_bodies_are_checked_against_the_callers_tenant() {
         ("alice", "POST", "/api/meal-plan-rules".to_string(), "household of another group".into(), json!({"household_ids": [w.t.c.household_id]})),
         ("alice", "PUT", format!("/api/meal-plan-rules/{}", i.rule), "household of another group".into(), json!({"household_ids": [w.t.c.household_id]})),
         ("alice", "PUT", format!("/api/shopping-list-items/{}", i.item), "label of another group".into(), json!({"note": "x", "label_id": c_label})),
+        ("alice", "POST", format!("/api/recipe-actions/{}/trigger", i.action), "recipe of another group".into(), json!({"recipe_id": c_recipe})),
+        ("alice", "POST", format!("/api/shopping-lists/{}/recipes", i.list), "recipe of another group and skip_on_hand".into(), json!({"recipe_id": c_recipe, "scale": 1, "skip_on_hand": true})),
     ];
     for (who, method, uri, what, body) in cases {
         let token = match who {

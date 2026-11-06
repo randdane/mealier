@@ -34,6 +34,10 @@ pub struct ErrorBody {
     crate::cookbooks::list_cookbooks, crate::cookbooks::create_cookbook, crate::cookbooks::get_cookbook, crate::cookbooks::put_cookbook, crate::cookbooks::delete_cookbook_route, crate::cookbooks::cookbook_recipes_route,
     crate::features::upload_asset, crate::features::list_assets, crate::features::delete_asset, crate::features::download_asset, crate::features::post_comment, crate::features::list_comments,
     crate::features::get_food, crate::features::put_food_extras, crate::features::list_food_substitutions, crate::features::add_food_substitution_route, crate::features::put_food_substitution, crate::features::delete_food_substitution, crate::features::put_list_extras,
+    crate::favourites::get_mine, crate::favourites::put_favourite, crate::favourites::put_rating,
+    crate::pantry::get_pantry, crate::pantry::put_on_hand, crate::pantry::put_owned,
+    crate::actions::list_actions, crate::actions::create_action_route, crate::actions::put_action, crate::actions::delete_action_route, crate::actions::recipe_actions, crate::actions::trigger,
+    crate::share::list_links, crate::share::create_link, crate::share::revoke_link,
     crate::rules::list_rules, crate::rules::create_rule, crate::rules::get_rule, crate::rules::put_rule, crate::rules::delete_rule_route, crate::rules::suggest_route
 ), modifiers(&BearerScheme), security(("bearer" = [])))]
 struct ApiDoc;
@@ -72,6 +76,9 @@ struct ListParams {
     include_archived: bool,
     /// Case-insensitive substring match on name or description.
     q: Option<String>,
+    /// Only the caller's favourites. Defaults to false.
+    #[serde(default)]
+    favourites: bool,
 }
 
 #[utoipa::path(
@@ -79,7 +86,12 @@ struct ListParams {
     responses((status = 200, description = "Recipe summaries, sorted by name", body = [RecipeSummary]))
 )]
 async fn list(sc: Scope, State(db): State<Db>, Query(p): Query<ListParams>) -> Result<Json<Vec<RecipeSummary>>, Error> {
-    Ok(Json(db.list_recipes(&sc, p.include_archived, p.q.as_deref()).await?))
+    let mut all = db.list_recipes(&sc, p.include_archived, p.q.as_deref()).await?;
+    if p.favourites {
+        let mine: std::collections::HashSet<i64> = db.favourite_recipes(&sc).await?.into_iter().map(|r| r.id).collect();
+        all.retain(|r| mine.contains(&r.id));
+    }
+    Ok(Json(all))
 }
 
 #[utoipa::path(
@@ -455,6 +467,9 @@ struct ListRecipe {
     recipe_id: i64,
     /// Multiplier on the recipe's amounts; greater than 0.
     scale: f64,
+    /// Leave out the lines whose food the caller's household has on hand. Defaults to false.
+    #[serde(default)]
+    skip_on_hand: bool,
 }
 
 #[utoipa::path(
@@ -466,7 +481,7 @@ struct ListRecipe {
     )
 )]
 async fn list_add_recipe(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(r): Json<ListRecipe>) -> Result<Json<ShoppingList>, Error> {
-    Ok(Json(db.add_recipe_to_list(&sc, id, r.recipe_id, r.scale).await?))
+    Ok(Json(db.add_recipe_to_list_with(&sc, id, r.recipe_id, r.scale, r.skip_on_hand).await?))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -678,6 +693,10 @@ pub fn router_with_restart(state: AppState, import: ImportService, auth: crate::
         .merge(crate::cookbooks::routes())
         .merge(crate::rules::routes())
         .merge(crate::features::routes())
+        .merge(crate::share::routes())
+        .merge(crate::favourites::routes())
+        .merge(crate::pantry::routes())
+        .merge(crate::actions::routes())
         .merge(crate::backup::routes())
         .layer(Extension(restart))
         .layer(Extension(Arc::new(import)))

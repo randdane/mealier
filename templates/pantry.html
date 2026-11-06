@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Pantry - mealier{% endblock %}
+{% block content %}
+<h1>Pantry</h1>
+<p><small>Foods you have on hand and tools you own, for your household. The foods and tools themselves are shared by the whole group. A shopping list can skip foods you have on hand.</small></p>
+
+<h2>Foods on hand</h2>
+<ul>
+{% for f in pantry.foods %}
+  <li>{{ f.name }}
+    <form method="post" action="/pantry/foods/{{ f.id }}" class="inline">
+      <input type="hidden" name="have" value="{% if f.have %}0{% else %}1{% endif %}">
+      <button type="submit" class="quiet" aria-pressed="{% if f.have %}true{% else %}false{% endif %}">{% if f.have %}On hand: remove{% else %}Mark on hand{% endif %}</button>
+    </form>
+  </li>
+{% else %}<li>No foods yet.</li>{% endfor %}
+</ul>
+
+<h2>Tools owned</h2>
+<ul>
+{% for t in pantry.tools %}
+  <li>{{ t.name }}
+    <form method="post" action="/pantry/tools/{{ t.id }}" class="inline">
+      <input type="hidden" name="have" value="{% if t.have %}0{% else %}1{% endif %}">
+      <button type="submit" class="quiet" aria-pressed="{% if t.have %}true{% else %}false{% endif %}">{% if t.have %}Owned: remove{% else %}Mark owned{% endif %}</button>
+    </form>
+  </li>
+{% else %}<li>No tools yet.</li>{% endfor %}
+</ul>
+{% endblock %}

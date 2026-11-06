@@ -147,8 +147,10 @@ Sablier stops the container when idle, so stop/start is routine.
   parsed form. Membership is computed, not stored.
 - **Shopping list** and items (household-scoped); items carry label, extras
   and recipe references.
-- **Recipe action**: household, title, kind (`link` or `post`), URL template.
-- **Share link**: group, recipe, token (stored only as a hash), expiry.
+- **Recipe action**: household, title, kind (`link` or `post`), URL.
+- **Share link**: group, recipe, token (stored only as a hash), creator, expiry.
+- **Favourite / rating**: user, recipe, favourite flag, rating (half stars, optional).
+- **Food on hand / tool owned**: household and a food or tool of its group.
 
 ## Features
 
@@ -157,7 +159,13 @@ Sablier stops the container when idle, so stop/start is routine.
 CRUD in the API and the HTML form for every recipe field: steps, sections,
 tags, categories, tools, cookbooks, images, assets, notes, settings, extras.
 A name used by a recipe is added to its group's vocabulary if it is new.
-Search. Every save writes a snapshot. Favourites and ratings per user (still to come).
+Search. Every save writes a snapshot.
+
+- **Favourites and ratings** are the user's own, per recipe (`user_recipes`), for any recipe of their
+  group. A rating is Mealie's float kept to half stars, 0.5 to 5, or none. The recipe page has a star
+  toggle and a rating select; the recipe list filters to `?favourites=1` (API: `?favourites=true`);
+  `GET /api/recipes/{id}/mine`, `PUT .../favourite`, `PUT .../rating`. Archiving a recipe hides it from
+  the favourites list but keeps the rows.
 
 - **Form**: a `## ` line in the ingredients box starts a section, in the steps box
   titles the step after it; notes, extras and substitutions are rows (a hidden
@@ -232,7 +240,8 @@ recipes; no value is ever spliced into SQL. Supported: `tags`, `recipe_category`
 `rating` with the same comparisons against a number; `AND`, `OR` (AND binds
 tighter) and parentheses; keywords and field spellings are case-insensitive.
 `lastMade` and `rating` read the caller's household's done batches (rating is
-their average until per-user ratings arrive in step 14); `dateAdded` is the
+their average; per-user ratings now exist, and switching `rating` to the caller's own is still
+to do, because it changes `tests/filter.rs`); `dateAdded` is the
 first snapshot's day, `dateUpdated` the current one's. An empty filter selects
 every recipe. Anything else is an error naming the token: the API and forms
 refuse it (422); the importer keeps the string verbatim, stores no parsed form
@@ -263,21 +272,53 @@ order; labels without a place sort by name after the placed ones), changed with 
 
 ### Foods on hand and tools
 
-Each household can mark foods it has on hand and tools it owns. Adding a recipe
-to a shopping list can skip on-hand foods.
+Each household marks the foods it has on hand and the tools it owns; the foods and tools are the
+group's, the marks are the household's (`household_foods`, `household_tools`). `/pantry` lists
+both with a toggle; `GET /api/pantry`, `PUT /api/foods/{id}/on-hand`, `PUT /api/tools/{id}/owned`.
+Adding a recipe to a shopping list can skip lines whose food is on hand: a checkbox on the recipe
+page, default off (`skip_on_hand` in `POST /api/shopping-lists/{id}/recipes`). Lines with no food
+are never skipped.
 
 ### Recipe actions
 
-Per household: a link action opens a URL built from a template with the
-recipe's fields; a post action sends the recipe as JSON to a URL (same
-delivery rules as webhooks).
+Per household, managed at `/settings/actions` and `/api/recipe-actions`. A **link** action opens a
+URL built from a template; the recipe page shows it as `<a rel="noopener noreferrer">`, and only
+when the result is an http or https URL. The template uses Mealie's merge fields, so imported
+actions work unchanged: `${id}`, `${slug}` (the name, slugified: recipes have no slug column),
+`${url}` (the recipe's address, absolute with `MEALIER_BASE_URL`); each value is percent-encoded.
+`${servings}`, `${yieldQuantity}` and `${yieldText}` are Mealie's but a mealier recipe has no yield,
+so they come out empty; any other `${...}` is left as written. A **post** action sends the recipe
+(the API's recipe JSON) to the URL from the server (`POST /api/recipe-actions/{id}/trigger`, or the
+button on the recipe page), with the webhook client: internal hosts are allowed, no redirects, 10 s.
+
+Who may write what: any household member creates, edits and deletes **link** actions; creating a
+**post** action, or editing one (or turning a link into one), is **admin-only**, because it makes the
+server send requests where the admin chose. Any member may delete any action of their household
+(deleting sends nothing) and may press a post action an admin set up. A receiver that fails or does
+not answer 2xx makes the trigger a 422 naming the action.
 
 ### Share links
 
 A share link gives read-only access to one recipe at `/share/<token>` with no
-login, until it expires or is revoked. The page shows the recipe only: no
-batches, comments or household data. Tokens are random, stored only as a hash;
-imported Mealie share tokens keep working.
+login, until it expires or is revoked. Any member of the recipe's group makes one
+(`POST /api/recipes/{id}/share-links`, or the recipe page): 1 to 365 days, default 30. The token is
+32 random bytes as base64url, shown once and stored only as its SHA-256; the list shows dates, not
+tokens. Revoking deletes the row (`DELETE /api/share-links/{id}`), and any member of the group may.
+
+- **The page** shows the recipe's own content: name, description, image, ingredients (with
+  substitutions), steps, notes, and nutrition unless the recipe hides it. No batches, comments,
+  household data, tags, extras, source URL, or links to authenticated pages. Assets are listed and
+  served only when the recipe's `show_assets` setting is on (now enforced), by
+  `/share/<token>/assets/<hash>`; the image by `/share/<token>/images/<name>`. Those are the only
+  routes a token opens, each checks the file belongs to the token's recipe, and an archived recipe
+  stops being shared.
+- **Every share response** (page, 404, redirect, files) carries `Referrer-Policy: no-referrer` and
+  `Cache-Control: private, no-store`.
+- **Unknown, expired, revoked and malformed** tokens give the same 404 page, byte for byte, with no
+  navigation. No rate limit: a token is 256 bits.
+- **Mealie's links**: its token is the share row's `id`, shown dashed in the URL
+  `/g/<group-slug>/shared/r/<token>`. The importer hashes the dashed form, so `/share/<mealie token>`
+  works, and that URL shape redirects (307) to `/share/<token>` without looking the token up.
 
 ### URL import (plugin chain)
 
@@ -372,7 +413,9 @@ nothing does by default. Imported ones start disabled.
 - Signup off.
 - API access uses per-user tokens.
 - Public routes: `/healthz`, `/login*`, `/auth/callback`, `/static/*` and
-  `/share/<token>`. Everything else needs a user.
+  the share routes (`/share/<token>`, `/share/<token>/assets/<hash>`, `/share/<token>/images/<name>`,
+  `/g/<group>/shared/r/<token>`: whole segments, none empty, nothing else under `/share`).
+  Everything else needs a user.
 
 ### Backup and export
 
@@ -443,6 +486,21 @@ notifiers; scheduled webhooks.
   `json://`/`jsons://` become JSON webhooks; other schemes are reported as
   skipped. Subscribed events map to the mealier events above.
 - Scheduled webhooks are imported disabled.
+- Favourites and ratings: `users_to_recipes` (`user_id`, `recipe_id`, `rating`, `is_favorite`). A
+  rating of 0 or none is no rating; others are kept to the nearest half star in 0.5 to 5 and reported
+  when that changed them; a row with neither a favourite nor a rating is dropped. A user and recipe of
+  different groups refuse the import.
+- Recipe actions: `recipe_actions` (`group_id`, `household_id`, `action_type`, `title`, `url`) as
+  written, a post action included (an import is the owner's act). No household means the group's first;
+  a type other than `link` or `post` is reported and left out.
+- Foods on hand and tools owned: `households_to_ingredient_foods` (`household_id`, `food_id`) and
+  `households_to_tools` (`household_id`, `tool_id`). The old `on_hand` flags on foods and tools are
+  deprecated in Mealie and are not read.
+- Share links: `recipe_share_tokens` (`id`, `group_id`, `recipe_id`, `expires_at`). The `id` is the
+  token; the dashed form its URL shows is hashed, so old links keep working. Expiry is read as UTC;
+  one that is not a date is reported and left out. Expired links are imported and answer 404.
+- The columns of these five tables are from Mealie v3.28.0's models: the fixture's copies are empty
+  (and `recipe_share_tokens` is dropped by the fixture script as a secret), so tests inject rows.
 
 **Skipped on purpose, one report line each:** `long_live_tokens`,
 `invite_tokens`, `password_reset_tokens` (secrets and one-time links);
@@ -472,8 +530,11 @@ rules.
 Remaining, in order:
 
 14. Recipe features. Part A done (2026-11-06): assets, notes, sections, ingredient
-    links, substitutions, extras, settings and their importer mapping. Part B:
-    favourites and ratings, recipe actions, foods on hand and tools owned, share links.
+    links, substitutions, extras, settings and their importer mapping. Part B done
+    (2026-11-06, not committed): favourites and ratings, recipe actions, foods on hand and tools
+    owned, share links, and their importer mapping. One item is open: `filter.rs` `rating` still
+    averages the household's batch ratings, because reading the caller's own rating changes an
+    assertion in `tests/filter.rs` (`last_made_and_rating_read_the_callers_household`).
 15. Notifier events and scheduled webhooks.
 16. Fixture and importer coverage for every mapped table.
 17. Deploy (`stacks/mealier`).
@@ -482,12 +543,13 @@ Remaining, in order:
 
 2026-11-06.
 
-- Phase: step 14 part A (recipe features) done, not committed; 507 tests pass (1 ignored,
-  needs a real Mealie backup), clippy clean with `-D warnings`.
+- Phase: step 14 parts A and B done, not committed; 556 tests pass (1 ignored, needs a real
+  Mealie backup), clippy clean with `-D warnings`.
 - In flight: nothing. No agents or servers running.
-- Blocked on the owner: nothing until deploy (step 17 needs a GitHub repo,
-  an Authentik application, and secrets).
-- Next: step 14 part B, then 15–16 without stopping unless a decision is needed.
+- Blocked on the owner: the `filter.rs` `rating` switch to the caller's own rating, which changes
+  an existing assertion in `tests/filter.rs`; and, until deploy, step 17 (a GitHub repo, an Authentik
+  application, and secrets).
+- Next: 15–16 without stopping unless a decision is needed.
 - Production Mealie still holds the `mealier-fixture` items and three extra
   backups; `scripts/cleanup-mealie-fixture.py` removes the items after step 16
   (step 16 adds more fixture data first).

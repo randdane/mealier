@@ -355,18 +355,22 @@ pub(crate) async fn download_asset(sc: Scope, State(s): State<AppState>, UrlPath
     let (true, Some(recipe)) = (hex_name, q.recipe) else { return Err(Error::NotFound("asset")) };
     let asset = s.db.recipe_asset(&sc, recipe, &hash).await?;
     let bytes = tokio::fs::read(s.assets_dir().join(&hash)).await.map_err(|_| Error::NotFound("asset"))?;
-    // Never inline, never sniffed, and sandboxed even if something opens it: the bytes are whatever was uploaded.
-    Ok((
+    Ok(asset_response(&asset.file_name, bytes))
+}
+
+/// An asset as a download. Never inline, never sniffed, and sandboxed even if something opens it: the bytes are whatever was uploaded.
+pub(crate) fn asset_response(file_name: &str, bytes: Vec<u8>) -> Response {
+    (
         [
             (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", asset.file_name)),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{file_name}\"")),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
             (header::CONTENT_SECURITY_POLICY, "default-src 'none'; sandbox".to_string()),
             (header::CACHE_CONTROL, "private, no-store".to_string()),
         ],
         bytes,
     )
-        .into_response())
+        .into_response()
 }
 
 #[derive(Deserialize, ToSchema)]

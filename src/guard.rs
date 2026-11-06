@@ -132,7 +132,7 @@ pub(crate) struct Guard {
 /// Reachable without a user. Whole path segments only: `/loginx` is not `/login`.
 fn is_public(path: &str) -> bool {
     let under = |p: &str| path == p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/'));
-    path == "/healthz" || path == "/auth/callback" || under("/login") || path.starts_with("/static/")
+    path == "/healthz" || path == "/auth/callback" || under("/login") || path.starts_with("/static/") || crate::share::is_public_path(path)
 }
 
 /// Belt over the router: the admin-only areas are refused here even if a handler forgets `Admin`.

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Recipe actions - mealier{% endblock %}
+{% block content %}
+<h1>Recipe actions</h1>
+<p><small>For your household. A <em>link</em> opens a web address built from the recipe: <code>${id}</code>, <code>${slug}</code> and <code>${url}</code> are replaced (percent-encoded). A <em>post</em> sends the recipe as JSON to an address from the server, so only an admin can set one up.</small></p>
+<ul>
+{% for a in actions %}
+  <li><strong>{{ a.title }}</strong> <span class="badge">{{ a.kind }}</span> <code>{{ a.url }}</code>
+    <form method="post" action="/settings/actions/{{ a.id }}/delete" class="inline"><button type="submit" class="quiet">Delete</button></form>
+  </li>
+{% else %}<li>None yet.</li>{% endfor %}
+</ul>
+<h2>Add</h2>
+<form method="post" action="/settings/actions" class="stack">
+  <label>Title <input type="text" name="title" required></label>
+  <label>Kind
+    <select name="kind"><option value="link">link</option>{% if admin %}<option value="post">post</option>{% endif %}</select>
+  </label>
+  <label>URL <input type="url" name="url" placeholder="https://www.google.com/search?q=${slug}" required></label>
+  <button type="submit">Add action</button>
+</form>
+{% endblock %}

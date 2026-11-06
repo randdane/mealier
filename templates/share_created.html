@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Share link - mealier{% endblock %}
+{% block content %}
+<h1>Share link for {{ name }}</h1>
+<p>Anyone with this address can read the recipe until {{ expires_at }}. Copy it now: it is not shown again.</p>
+<p><a href="{{ path }}">{{ path }}</a></p>
+<p><a href="/recipes/{{ recipe }}">Back to the recipe</a></p>
+{% endblock %}

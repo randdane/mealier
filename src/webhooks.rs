@@ -163,8 +163,13 @@ impl Notifier {
         req.send().await.map(|r| r.status().as_u16()).map_err(|e| e.to_string())
     }
 
+    /// POSTs a JSON body to `url` (a recipe action); the status on any response, the error text otherwise.
+    pub(crate) async fn post_json(&self, url: &str, body: String) -> std::result::Result<u16, String> {
+        self.client.post(url).header("Content-Type", "application/json").body(body).send().await.map(|r| r.status().as_u16()).map_err(|e| e.to_string())
+    }
+
     /// `path` made absolute with the base URL, or left as is without one.
-    fn link(&self, path: &str) -> String {
+    pub(crate) fn link(&self, path: &str) -> String {
         format!("{}{path}", self.base_url.as_deref().unwrap_or(""))
     }
 }

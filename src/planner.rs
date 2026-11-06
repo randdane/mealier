@@ -174,10 +174,20 @@ impl Db {
     }
 
     pub async fn add_recipe_to_list(&self, sc: &Scope, list_id: i64, recipe_id: i64, scale: f64) -> Result<ShoppingList> {
+        self.add_recipe_to_list_with(sc, list_id, recipe_id, scale, false).await
+    }
+
+    /// `add_recipe_to_list`, optionally leaving out the lines whose food the caller's household has on hand.
+    pub async fn add_recipe_to_list_with(&self, sc: &Scope, list_id: i64, recipe_id: i64, scale: f64, skip_on_hand: bool) -> Result<ShoppingList> {
         check_scale(scale)?;
         self.list_exists(sc, list_id).await?;
         let r = self.get_recipe(sc, recipe_id).await?.ok_or(Error::NotFound("recipe"))?;
-        let lines = r.content.ingredients.iter().map(|i| ItemInput {
+        let on_hand: std::collections::HashSet<i64> = if skip_on_hand {
+            sqlx::query_scalar("SELECT food_id FROM household_foods WHERE household_id = ?").bind(sc.household_id).fetch_all(&self.pool).await?.into_iter().collect()
+        } else {
+            Default::default()
+        };
+        let lines = r.content.ingredients.iter().filter(|i| !i.food_id.is_some_and(|f| on_hand.contains(&f))).map(|i| ItemInput {
             qty: i.qty_min.map(|q| q * scale),
             qty_max: i.qty_max.map(|q| q * scale),
             unit_id: i.unit_id,

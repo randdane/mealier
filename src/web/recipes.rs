@@ -28,24 +28,37 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/recipes/{id}/link-ingredients", get(link_page).post(link_save))
         .route("/recipes/{id}/assets", post(add_asset).layer(DefaultBodyLimit::max(crate::MAX_ASSET_BYTES + 1024 * 1024)))
         .route("/recipes/{id}/assets/{hash}/delete", post(delete_asset))
+        .route("/recipes/{id}/favourite", post(favourite_form))
+        .route("/recipes/{id}/rating", post(rating_form))
+        .route("/recipes/{id}/actions/{action}/run", post(run_action))
+        .route("/recipes/{id}/share-links", post(create_share_link))
+        .route("/recipes/{id}/share-links/{link}/delete", post(delete_share_link))
 }
 
 #[derive(Template, WebTemplate)]
 #[template(path = "index.html")]
 struct Index {
     q: String,
+    /// Only the caller's favourites.
+    favourites: bool,
     recipes: Vec<crate::RecipeSummary>,
 }
 
 #[derive(Deserialize)]
 struct Search {
     q: Option<String>,
+    favourites: Option<String>,
 }
 
 async fn index(sc: Scope, State(db): State<Db>, Query(s): Query<Search>) -> Result<Index> {
     let q = s.q.unwrap_or_default();
-    let recipes = db.list_recipes(&sc, false, Some(q.trim()).filter(|q| !q.is_empty())).await?;
-    Ok(Index { q, recipes })
+    let favourites = s.favourites.is_some_and(|f| !f.is_empty() && f != "0");
+    let mut recipes = db.list_recipes(&sc, false, Some(q.trim()).filter(|q| !q.is_empty())).await?;
+    if favourites {
+        let mine: std::collections::HashSet<i64> = db.favourite_recipes(&sc).await?.into_iter().map(|r| r.id).collect();
+        recipes.retain(|r| mine.contains(&r.id));
+    }
+    Ok(Index { q, favourites, recipes })
 }
 
 struct BatchRow {
@@ -57,20 +70,49 @@ struct BatchRow {
 }
 
 /// A run of ingredient lines under one section title (the first run may have none).
-struct IngGroup {
-    title: String,
-    lines: Vec<IngLine>,
+pub(super) struct IngGroup {
+    pub title: String,
+    pub lines: Vec<IngLine>,
 }
 
-struct IngLine {
-    text: String,
+pub(super) struct IngLine {
+    pub text: String,
     /// "or ..." texts: the line's own substitutions, then its food's.
-    alternatives: Vec<String>,
+    pub alternatives: Vec<String>,
 }
 
-struct StepView {
-    title: String,
-    text: String,
+pub(super) struct StepView {
+    pub title: String,
+    pub text: String,
+}
+
+/// What a recipe page and a share page both show of the recipe's own content.
+pub(super) struct ContentView {
+    pub groups: Vec<IngGroup>,
+    pub steps: Vec<StepView>,
+    pub nutrition: Vec<String>,
+}
+
+/// The ingredients (with their substitutions, from the scope's group), steps and nutrition of `c`.
+pub(super) async fn content_view(db: &Db, sc: &Scope, c: &crate::Content) -> Result<ContentView> {
+    let foods: Vec<i64> = c.ingredients.iter().filter_map(|i| i.food_id).collect();
+    let by_food = db.substitutes_of(sc, &foods).await?;
+    let mut groups: Vec<IngGroup> = Vec::new();
+    for i in &c.ingredients {
+        if groups.is_empty() || !i.section.is_empty() {
+            groups.push(IngGroup { title: i.section.clone(), lines: Vec::new() });
+        }
+        let own = i.substitutions.iter().map(|s| alternative(s.qty, s.unit.as_deref(), s.food.as_deref(), &s.note));
+        let of_food = i.food_id.and_then(|f| by_food.get(&f)).into_iter().flatten().map(|s| alternative(None, None, Some(&s.name), &s.note));
+        let alternatives = own.chain(of_food).filter(|a| !a.is_empty()).map(|a| format!("or {a}")).collect();
+        groups.last_mut().expect("a group was just pushed").lines.push(IngLine { text: ingredient_line(i, 1.0), alternatives });
+    }
+    let steps = c.steps.iter().enumerate().map(|(n, t)| StepView { title: c.step_details.get(n).map(|d| d.title.clone()).unwrap_or_default(), text: t.clone() }).collect();
+    let nutrition = match (&c.nutrition, c.settings.hide_nutrition) {
+        (Some(n), false) => [("Calories", n.calories), ("Protein (g)", n.protein_g), ("Fat (g)", n.fat_g), ("Carbohydrate (g)", n.carbs_g)].into_iter().filter_map(|(k, v)| v.map(|v| format!("{k}: {}", num(v)))).collect(),
+        _ => Vec::new(),
+    };
+    Ok(ContentView { groups, steps, nutrition })
 }
 
 struct AssetView {
@@ -98,10 +140,17 @@ struct RecipePage {
     notes: Vec<Note>,
     extras: Vec<(String, String)>,
     assets: Vec<AssetView>,
+    share_links: Vec<crate::ShareLink>,
+    /// The caller's own.
+    favourite: bool,
+    rated: bool,
+    /// 0.5 to 5 in half steps: the option value and whether it is the caller's.
+    rating_options: Vec<(String, bool)>,
+    action_links: Vec<crate::ActionLink>,
 }
 
 /// "1.5 tbsp butter (note)" for a substitution, as shown after "or".
-fn alternative(qty: Option<f64>, unit: Option<&str>, food: Option<&str>, note: &str) -> String {
+pub(super) fn alternative(qty: Option<f64>, unit: Option<&str>, food: Option<&str>, note: &str) -> String {
     let what = [amount(qty, qty, unit), food.unwrap_or_default().to_string()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
     match (what.is_empty(), note.is_empty()) {
         (_, true) => what,
@@ -113,19 +162,8 @@ fn alternative(qty: Option<f64>, unit: Option<&str>, food: Option<&str>, note: &
 async fn recipe_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<RecipePage> {
     let r = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?;
     let c = r.content;
-    let foods: Vec<i64> = c.ingredients.iter().filter_map(|i| i.food_id).collect();
-    let by_food = db.substitutes_of(&sc, &foods).await?;
-    let mut groups: Vec<IngGroup> = Vec::new();
-    for i in &c.ingredients {
-        if groups.is_empty() || !i.section.is_empty() {
-            groups.push(IngGroup { title: i.section.clone(), lines: Vec::new() });
-        }
-        let own = i.substitutions.iter().map(|s| alternative(s.qty, s.unit.as_deref(), s.food.as_deref(), &s.note));
-        let of_food = i.food_id.and_then(|f| by_food.get(&f)).into_iter().flatten().map(|s| alternative(None, None, Some(&s.name), &s.note));
-        let alternatives = own.chain(of_food).filter(|a| !a.is_empty()).map(|a| format!("or {a}")).collect();
-        groups.last_mut().expect("a group was just pushed").lines.push(IngLine { text: ingredient_line(i, 1.0), alternatives });
-    }
-    let steps = c.steps.iter().enumerate().map(|(n, t)| StepView { title: c.step_details.get(n).map(|d| d.title.clone()).unwrap_or_default(), text: t.clone() }).collect();
+    let ContentView { groups, steps, nutrition } = content_view(&db, &sc, &c).await?;
+    let mine = db.opinion(&sc, id).await?;
     let batches = db
         .list_batches(&sc, id)
         .await?
@@ -138,10 +176,6 @@ async fn recipe_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Re
             rating: b.rating.map(|r| r.to_string()).unwrap_or_default(),
         })
         .collect();
-    let nutrition = match (&c.nutrition, c.settings.hide_nutrition) {
-        (Some(n), false) => [("Calories", n.calories), ("Protein (g)", n.protein_g), ("Fat (g)", n.fat_g), ("Carbohydrate (g)", n.carbs_g)].into_iter().filter_map(|(k, v)| v.map(|v| format!("{k}: {}", num(v)))).collect(),
-        _ => Vec::new(),
-    };
     let assets = db.recipe_assets(&sc, id).await?.into_iter().map(|a| AssetView { name: a.name, file_name: a.file_name, hash: a.hash }).collect();
     Ok(RecipePage {
         id,
@@ -159,11 +193,74 @@ async fn recipe_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Re
         notes: c.notes,
         extras: c.extras.into_iter().collect(),
         assets,
+        share_links: db.share_links(&sc, id).await?,
+        favourite: mine.favourite,
+        rated: mine.rating.is_some(),
+        rating_options: (1..=10).map(|n| (num(f64::from(n) / 2.0), mine.rating == Some(f64::from(n) / 2.0))).collect(),
+        action_links: db.recipe_action_links(&sc, id).await?,
     })
 }
 
+#[derive(Deserialize)]
+struct FavouriteForm {
+    #[serde(default)]
+    favourite: String,
+}
+
+async fn favourite_form(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<FavouriteForm>) -> Result<Redirect> {
+    db.set_favourite(&sc, id, f.favourite == "1").await?;
+    Ok(Redirect::to(&format!("/recipes/{id}")))
+}
+
+#[derive(Deserialize)]
+struct RatingForm {
+    #[serde(default)]
+    rating: String,
+}
+
+async fn rating_form(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<RatingForm>) -> Result<Redirect> {
+    db.set_rating(&sc, id, number(&f.rating)?).await?;
+    Ok(Redirect::to(&format!("/recipes/{id}")))
+}
+
+async fn run_action(sc: Scope, State(db): State<Db>, Path((id, action)): Path<(i64, i64)>) -> Result<Redirect> {
+    db.trigger_action(&sc, action, id).await?;
+    Ok(Redirect::to(&format!("/recipes/{id}")))
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "share_created.html")]
+struct ShareCreated {
+    recipe: i64,
+    name: String,
+    path: String,
+    expires_at: String,
+}
+
+#[derive(Deserialize)]
+struct ShareForm {
+    #[serde(default)]
+    days: String,
+}
+
+/// The one place the token is shown: this response is the page, not a redirect, so it is not in any history of the list.
+async fn create_share_link(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<ShareForm>) -> Result<ShareCreated> {
+    let days = match f.days.trim() {
+        "" => None,
+        d => Some(d.parse().map_err(|_| Error::Validation(format!("'{d}' is not a number of days")))?),
+    };
+    let name = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?.content.name;
+    let n = db.create_share_link(&sc, id, days).await?;
+    Ok(ShareCreated { recipe: id, name, path: n.path, expires_at: n.link.expires_at })
+}
+
+async fn delete_share_link(sc: Scope, State(db): State<Db>, Path((id, link)): Path<(i64, i64)>) -> Result<Redirect> {
+    db.revoke_share_link(&sc, link).await?;
+    Ok(Redirect::to(&format!("/recipes/{id}")))
+}
+
 /// One ingredient as text, amounts times `scale`; falls back to the original text.
-fn ingredient_line(i: &crate::Ingredient, scale: f64) -> String {
+pub(super) fn ingredient_line(i: &crate::Ingredient, scale: f64) -> String {
     let what = [i.food_name.as_deref().unwrap_or_default(), &i.note];
     let what = what.iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(", ");
     let q = |n: Option<f64>| n.map(|n| n * scale);

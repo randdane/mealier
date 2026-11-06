@@ -15,8 +15,10 @@ mod planner;
 mod recipes;
 mod settings;
 mod shopping;
+mod share;
 
 pub(crate) use recipes::estimate_recipe;
+pub(crate) use share::share_page;
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()

@@ -6,7 +6,24 @@
 {% if !description.is_empty() %}<p>{{ description }}</p>{% endif %}
 
 {% if locked %}<p class="badge">This recipe is locked: edits are refused until it is unlocked.</p>{% endif %}
+<form method="post" action="/recipes/{{ id }}/favourite" class="inline">
+  <input type="hidden" name="favourite" value="{% if favourite %}0{% else %}1{% endif %}">
+  <button type="submit" class="quiet" aria-pressed="{% if favourite %}true{% else %}false{% endif %}">{% if favourite %}&#9733; Favourite{% else %}&#9734; Add to favourites{% endif %}</button>
+</form>
+<form method="post" action="/recipes/{{ id }}/rating" class="inline">
+  <label>Your rating
+    <select name="rating">
+      <option value=""{% if !rated %} selected{% endif %}>none</option>
+      {% for o in rating_options %}<option value="{{ o.0 }}"{% if o.1 %} selected{% endif %}>{{ o.0 }}</option>{% endfor %}
+    </select>
+  </label>
+  <button type="submit" class="quiet">Save</button>
+</form>
 <p><a href="/recipes/{{ id }}/cook">Cook</a> · <a href="/recipes/{{ id }}/edit">Edit</a> · <a href="/recipes/{{ id }}/ingredients/review">Review ingredients</a></p>
+
+{% if !action_links.is_empty() %}
+<p>{% for a in action_links %}{% if a.kind == "link" %}{% if let Some(h) = a.href %}<a href="{{ h }}" rel="noopener noreferrer" target="_blank">{{ a.title }}</a>{% endif %}{% else %}<form method="post" action="/recipes/{{ id }}/actions/{{ a.id }}/run" class="inline"><button type="submit" class="quiet">{{ a.title }}</button></form>{% endif %} {% endfor %}</p>
+{% endif %}
 
 <h2>Ingredients</h2>
 {% for g in groups %}
@@ -41,6 +58,19 @@
 <table><tbody>{% for e in extras %}<tr><th>{{ e.0 }}</th><td>{{ e.1 }}</td></tr>{% endfor %}</tbody></table>
 {% endif %}
 
+<h2>Share</h2>
+<p><small>A share link lets anyone who has it read this recipe, without signing in, until it expires or you revoke it. The address is shown once.</small></p>
+<form method="post" action="/recipes/{{ id }}/share-links" class="stack">
+  <label>Days <input type="number" name="days" value="30" min="1" max="365" required></label>
+  <button type="submit">Create a share link</button>
+</form>
+{% if !share_links.is_empty() %}
+<ul>
+{% for l in share_links %}<li>Made {{ l.created_at }}, expires {{ l.expires_at }}
+  <form method="post" action="/recipes/{{ id }}/share-links/{{ l.id }}/delete" class="inline"><button type="submit" class="quiet">Revoke</button></form></li>{% endfor %}
+</ul>
+{% endif %}
+
 <h2>Plan</h2>
 <form method="post" action="/plan/entries" class="stack">
   <input type="hidden" name="recipe_id" value="{{ id }}">
@@ -56,6 +86,7 @@
   <label>List <select name="list_id"><option value="">(choose)</option>{% for l in lists %}<option value="{{ l.id }}">{{ l.name }}</option>{% endfor %}</select></label>
   <label>or new <input type="text" name="new_list" placeholder="New list name"></label>
   <label>Scale <input type="number" name="scale" value="1" step="any" min="0" required inputmode="decimal"></label>
+  <label><input type="checkbox" name="skip_on_hand" value="1"> Skip foods I have on hand</label>
   <button type="submit">Add to shopping list</button>
 </form>
 
