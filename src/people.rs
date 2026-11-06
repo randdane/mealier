@@ -1,5 +1,6 @@
 //! Read side of the tables the Mealie importer fills.
 use serde::Serialize;
+use utoipa::ToSchema;
 use sqlx::Row;
 
 use crate::{Db, Dimension, Error, Result};
@@ -32,7 +33,7 @@ pub struct User {
     pub disabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct Batch {
     pub id: i64,
     pub status: String,
@@ -80,7 +81,7 @@ pub struct ShoppingList {
     pub items: Vec<ShoppingItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct Image {
     pub hash: String,
     pub mime: String,
@@ -91,6 +92,19 @@ pub struct Comment {
     pub user_id: Option<i64>,
     pub text: String,
     pub created_at: String,
+}
+
+impl Image {
+    /// The file under the images dir: `<hash>.<ext>`.
+    pub fn file_name(&self) -> String {
+        let ext = match self.mime.as_str() {
+            "image/png" => "png",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            _ => "jpg",
+        };
+        format!("{}.{ext}", self.hash)
+    }
 }
 
 fn names(json: &str) -> Vec<String> {
@@ -137,11 +151,11 @@ impl Db {
             .collect())
     }
 
-    /// Newest first.
+    /// Newest first; undated (planned) batches lead.
     pub async fn list_batches(&self, recipe_id: i64) -> Result<Vec<Batch>> {
         let rows = sqlx::query(
             "SELECT id, status, recipe_id, snapshot_id, source, made_on, scale, rating, notes FROM batches
-             WHERE recipe_id = ? ORDER BY made_on DESC, id DESC",
+             WHERE recipe_id = ? ORDER BY made_on IS NULL DESC, made_on DESC, id DESC",
         )
         .bind(recipe_id)
         .fetch_all(&self.pool)

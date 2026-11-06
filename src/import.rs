@@ -443,6 +443,11 @@ async fn import_shopping(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport)
     Ok(())
 }
 
+/// Images are stored as `<images_dir>/<image_hash>.<ext>`.
+pub(crate) fn image_hash(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn dashed(uuid: &str) -> String {
     format!("{}-{}-{}-{}-{}", &uuid[..8], &uuid[8..12], &uuid[12..16], &uuid[16..20], &uuid[20..])
 }
@@ -476,7 +481,7 @@ async fn import_images(
         };
         let mut bytes = Vec::new();
         archive.by_name(&name).map_err(archive_err)?.read_to_end(&mut bytes).map_err(archive_err)?;
-        let hash: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        let hash = image_hash(&bytes);
         if files.insert(format!("{hash}.{ext}"), bytes).is_none() {
             sqlx::query("INSERT INTO images (hash, mime) VALUES (?, ?)").bind(&hash).bind(mime).execute(&mut **tx).await?;
             report.images += 1;

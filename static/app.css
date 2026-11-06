@@ -1,0 +1,37 @@
+:root {
+  color-scheme: light dark;
+  --bg: #fdfcf9; --fg: #1d1b18; --muted: #6b665e; --line: #d9d4ca; --accent: #1c6e4d; --field: #fff;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #17160f; --fg: #ece8df; --muted: #a29d92; --line: #3a372d; --accent: #6cc79d; --field: #22211a; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 1rem/1.5 system-ui, sans-serif; }
+header { padding: .75rem 1rem; border-bottom: 1px solid var(--line); font-weight: 600; }
+main { max-width: 52rem; margin: 0 auto; padding: 1rem; }
+a { color: var(--accent); }
+h1 { font-size: 1.5rem; margin: .5rem 0; }
+h2 { font-size: 1.15rem; margin: 1.5rem 0 .5rem; }
+input, select, textarea, button { font: inherit; color: inherit; background: var(--field); border: 1px solid var(--line); border-radius: .4rem; padding: .4rem .5rem; }
+button { background: var(--accent); color: var(--bg); border-color: var(--accent); cursor: pointer; }
+input[type=search], textarea, input[type=text] { width: 100%; }
+input[type=number] { width: 6rem; }
+label { display: inline-flex; gap: .4rem; align-items: center; margin-right: 1rem; }
+label.block { display: flex; flex-direction: column; align-items: stretch; margin: 1rem 0; }
+ul#list { padding-left: 1.2rem; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: .4rem .3rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+.fields { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+.actual { white-space: nowrap; }
+.buttons { display: flex; flex-wrap: wrap; gap: .5rem; }
+.badge { border: 1px solid var(--line); border-radius: 1rem; padding: .1rem .6rem; color: var(--muted); }
+.photos { display: flex; flex-wrap: wrap; gap: .5rem; }
+.photos img { height: 8rem; border-radius: .4rem; }
+.remove { font-size: .85rem; color: var(--muted); }
+@media (max-width: 40rem) {
+  table.lines thead { display: none; }
+  table.lines tr { display: block; border-bottom: 1px solid var(--line); padding: .5rem 0; }
+  table.lines td { display: block; border: 0; padding: .15rem 0; }
+  table.lines td::before { content: attr(data-label) ": "; color: var(--muted); font-size: .85rem; }
+  .actual { white-space: normal; }
+}

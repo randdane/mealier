@@ -9,10 +9,13 @@ sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runti
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["multipart"] }
 zip = { version = "9.4.1", default-features = false, features = ["deflate"] }
 sha2 = "0.11.1"
 utoipa = "6"
+askama = "0.16"
+askama_web = { version = "0.16", features = ["axum-0.8"] }
+serde_urlencoded = "0.7"
 
 [dev-dependencies]
 http-body-util = "0.1.5"

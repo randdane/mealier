@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Batch of {{ recipe_name }} - mealier{% endblock %}
+{% block content %}
+<h1><a href="/recipes/{{ recipe_id }}">{{ recipe_name }}</a>, batch {{ id }}</h1>
+<p><span class="badge">{{ status }}</span></p>
+
+<form method="post" action="/batches/{{ id }}" hx-boost="true">
+  <div class="fields">
+    <label>Date <input type="date" name="made_on" value="{{ made_on }}"></label>
+    <label>Scale <input type="number" name="scale" value="{{ scale }}" step="any" min="0" required inputmode="decimal"></label>
+    <label>Rating
+      <select name="rating">
+        <option value=""{% if rating == 0 %} selected{% endif %}>none</option>
+        {% for n in 1..6 %}<option value="{{ n }}"{% if rating == n %} selected{% endif %}>{{ n }}</option>{% endfor %}
+      </select>
+    </label>
+  </div>
+
+  <table class="lines">
+    <thead><tr><th>Ingredient</th><th>Recipe amount (scaled)</th><th>Actual</th><th>Substitution</th></tr></thead>
+    <tbody>
+    {% for l in lines %}
+      <tr>
+        <td data-label="Ingredient">
+          <input type="hidden" name="line_id" value="{{ l.id }}">
+          {% if l.added %}
+          <select name="food_id" aria-label="Added ingredient">
+            <option value="">(choose)</option>
+            {% for f in foods %}<option value="{{ f.id }}"{% if l.food_id == f.id %} selected{% endif %}>{{ f.name }}</option>{% endfor %}
+          </select>
+          <label class="remove"><input type="checkbox" name="remove" value="1"> remove</label>
+          {% else %}{{ l.ingredient }}{% endif %}
+        </td>
+        <td data-label="Recipe amount (scaled)">{{ l.recipe }}</td>
+        <td data-label="Actual" class="actual">
+          <input type="number" name="qty_min" value="{{ l.qty_min }}" step="any" min="0" inputmode="decimal" aria-label="Actual amount">
+          <input type="number" name="qty_max" value="{{ l.qty_max }}" step="any" min="0" inputmode="decimal" aria-label="Actual amount, upper end of a range">
+          <select name="unit_id" aria-label="Unit">
+            <option value="">(no unit)</option>
+            {% for u in units %}<option value="{{ u.id }}"{% if l.unit_id == u.id %} selected{% endif %}>{{ u.name }}</option>{% endfor %}
+          </select>
+        </td>
+        <td data-label="Substitution"><input type="text" name="substitution" value="{{ l.substitution }}" aria-label="Substitution"></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <label class="block">Notes <textarea name="notes" rows="4">{{ notes }}</textarea></label>
+
+  <div class="buttons">
+    <button type="submit">Save</button>
+    <button type="submit" formaction="/batches/{{ id }}/lines">Add ingredient</button>
+    {% if planned %}<button type="submit" formaction="/batches/{{ id }}/done">Mark done</button>{% endif %}
+  </div>
+</form>
+
+<h2>Photos</h2>
+<div class="photos">
+{% for p in photos %}<a href="/images/{{ p }}"><img src="/images/{{ p }}" alt="Photo of the batch" loading="lazy"></a>{% endfor %}
+</div>
+{% if photos.len() < 5 %}
+<form method="post" action="/batches/{{ id }}/photo" enctype="multipart/form-data" class="inline">
+  <label>Add a photo <input type="file" name="photo" accept="image/png,image/jpeg,image/webp" required></label>
+  <button type="submit">Upload</button>
+</form>
+{% endif %}
+{% endblock %}

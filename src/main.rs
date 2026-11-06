@@ -38,6 +38,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".into());
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
     eprintln!("mealier listening on {}", listener.local_addr()?);
-    axum::serve(listener, api::router(db)).with_graceful_shutdown(shutdown()).await?;
+    axum::serve(listener, api::router(api::AppState { db, images_dir: dir.join("images") })).with_graceful_shutdown(shutdown()).await?;
     Ok(())
 }
