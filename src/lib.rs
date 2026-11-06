@@ -50,12 +50,10 @@ impl Db {
         Ok(Db { pool })
     }
 
-    /// Raw pool, for tests of DB-level guarantees such as the snapshot trigger.
+    /// Raw pool. Exists only for tests of DB-level guarantees (snapshot trigger,
+    /// units CHECK, WAL pragma); not part of the API.
+    #[doc(hidden)]
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
-    }
-
-    pub async fn journal_mode(&self) -> Result<String> {
-        Ok(sqlx::query_scalar("PRAGMA journal_mode").fetch_one(&self.pool).await?)
     }
 }

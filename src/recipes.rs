@@ -70,15 +70,8 @@ pub struct Recipe {
     pub id: i64,
     pub archived: bool,
     pub current_snapshot_id: i64,
-    pub name: String,
-    pub description: String,
-    pub source_url: Option<String>,
-    pub nutrition: Option<Nutrition>,
-    pub tags: Vec<String>,
-    pub categories: Vec<String>,
-    pub cookbooks: Vec<String>,
-    pub ingredients: Vec<Ingredient>,
-    pub steps: Vec<String>,
+    #[serde(flatten)]
+    pub content: Content,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -108,7 +101,20 @@ async fn build_content(tx: &mut Transaction<'_, Sqlite>, input: RecipeInput) -> 
         return Err(Error::Validation("recipe name must not be empty".into()));
     }
     let mut ingredients = Vec::new();
-    for i in input.ingredients {
+    for mut i in input.ingredients {
+        match (i.qty_min, i.qty_max) {
+            (Some(min), None) => i.qty_max = Some(min),
+            (None, Some(_)) => return Err(Error::Validation("qty_max needs qty_min".into())),
+            _ => {}
+        }
+        if let (Some(min), Some(max)) = (i.qty_min, i.qty_max) {
+            if min < 0.0 || max < 0.0 {
+                return Err(Error::Validation("quantities must not be negative".into()));
+            }
+            if min > max {
+                return Err(Error::Validation("qty_min must not exceed qty_max".into()));
+            }
+        }
         let unit = match i.unit_id {
             Some(id) => {
                 let row = sqlx::query("SELECT name, factor FROM units WHERE id = ?")
@@ -175,48 +181,8 @@ impl Dimension {
     }
 }
 
-/// Replace a recipe's tags/categories/cookbooks. Arguments are fixed
-/// identifiers from this file, never user input.
-async fn set_names(
-    tx: &mut Transaction<'_, Sqlite>,
-    (table, join, col): (&str, &str, &str),
-    recipe_id: i64,
-    names: &[String],
-) -> Result<()> {
-    sqlx::query(&format!("DELETE FROM {join} WHERE recipe_id = ?"))
-        .bind(recipe_id)
-        .execute(&mut **tx)
-        .await?;
-    for n in names {
-        sqlx::query(&format!("INSERT OR IGNORE INTO {table} (name) VALUES (?)"))
-            .bind(n)
-            .execute(&mut **tx)
-            .await?;
-        sqlx::query(&format!(
-            "INSERT OR IGNORE INTO {join} (recipe_id, {col}) SELECT ?, id FROM {table} WHERE name = ?"
-        ))
-        .bind(recipe_id)
-        .bind(n)
-        .execute(&mut **tx)
-        .await?;
-    }
-    Ok(())
-}
-
-async fn get_names(db: &Db, (table, join, col): (&str, &str, &str), recipe_id: i64) -> Result<Vec<String>> {
-    Ok(sqlx::query_scalar(&format!(
-        "SELECT t.name FROM {table} t JOIN {join} j ON j.{col} = t.id WHERE j.recipe_id = ? ORDER BY t.name"
-    ))
-    .bind(recipe_id)
-    .fetch_all(&db.pool)
-    .await?)
-}
-
-const TAGS: (&str, &str, &str) = ("tags", "recipe_tags", "tag_id");
-const CATEGORIES: (&str, &str, &str) = ("categories", "recipe_categories", "category_id");
-const COOKBOOKS: (&str, &str, &str) = ("cookbooks", "recipe_cookbooks", "cookbook_id");
-
-async fn write_snapshot(tx: &mut Transaction<'_, Sqlite>, recipe_id: i64, c: &Content) -> Result<()> {
+/// Writes the snapshot, points the recipe at it, returns the snapshot id.
+async fn write_snapshot(tx: &mut Transaction<'_, Sqlite>, recipe_id: i64, c: &Content) -> Result<i64> {
     let snap = sqlx::query("INSERT INTO recipe_snapshots (recipe_id, content) VALUES (?, ?)")
         .bind(recipe_id)
         .bind(serde_json::to_string(c)?)
@@ -234,10 +200,7 @@ async fn write_snapshot(tx: &mut Transaction<'_, Sqlite>, recipe_id: i64, c: &Co
     .bind(recipe_id)
     .execute(&mut **tx)
     .await?;
-    set_names(tx, TAGS, recipe_id, &c.tags).await?;
-    set_names(tx, CATEGORIES, recipe_id, &c.categories).await?;
-    set_names(tx, COOKBOOKS, recipe_id, &c.cookbooks).await?;
-    Ok(())
+    Ok(snap)
 }
 
 fn snapshot_from(row: &sqlx::sqlite::SqliteRow) -> Result<Snapshot> {
@@ -251,6 +214,15 @@ fn snapshot_from(row: &sqlx::sqlite::SqliteRow) -> Result<Snapshot> {
 
 impl Db {
     pub async fn add_unit(&self, name: &str, dimension: Dimension, factor: Option<f64>) -> Result<i64> {
+        let ok = match dimension {
+            Dimension::Mass | Dimension::Volume => factor.is_some_and(|f| f > 0.0),
+            Dimension::Count | Dimension::Other => factor.is_none(),
+        };
+        if !ok {
+            return Err(Error::Validation(
+                "mass and volume units need a factor > 0; count and other units must have none".into(),
+            ));
+        }
         Ok(sqlx::query("INSERT INTO units (name, dimension, factor) VALUES (?, ?, ?)")
             .bind(name)
             .bind(dimension.as_str())
@@ -283,17 +255,14 @@ impl Db {
     pub async fn update_recipe(&self, id: i64, input: RecipeInput) -> Result<Recipe> {
         let mut tx = self.pool.begin().await?;
         let content = build_content(&mut tx, input).await?;
-        if sqlx::query_scalar::<_, i64>("SELECT id FROM recipes WHERE id = ?")
+        let archived = sqlx::query_scalar::<_, bool>("SELECT archived FROM recipes WHERE id = ?")
             .bind(id)
             .fetch_optional(&mut *tx)
             .await?
-            .is_none()
-        {
-            return Err(Error::NotFound("recipe"));
-        }
-        write_snapshot(&mut tx, id, &content).await?;
+            .ok_or(Error::NotFound("recipe"))?;
+        let current_snapshot_id = write_snapshot(&mut tx, id, &content).await?;
         tx.commit().await?;
-        self.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))
+        Ok(Recipe { id, archived, current_snapshot_id, content })
     }
 
     pub async fn archive_recipe(&self, id: i64) -> Result<()> {
@@ -304,9 +273,17 @@ impl Db {
         Ok(())
     }
 
-    pub async fn list_recipes(&self, include_archived: bool) -> Result<Vec<RecipeSummary>> {
-        let rows = sqlx::query("SELECT id, name, archived FROM recipes WHERE archived = 0 OR ? ORDER BY name, id")
-            .bind(include_archived)
+    pub async fn list_recipes(&self, include_archived: bool, q: Option<&str>) -> Result<Vec<RecipeSummary>> {
+        // Escape LIKE wildcards so the query is matched literally.
+        let pattern = q.map(|q| format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+        let rows = sqlx::query(
+            "SELECT id, name, archived FROM recipes
+             WHERE (archived = 0 OR ?1)
+               AND (?2 IS NULL OR name LIKE ?2 ESCAPE '\\' OR description LIKE ?2 ESCAPE '\\')
+             ORDER BY name, id",
+        )
+        .bind(include_archived)
+        .bind(pattern)
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(|r| RecipeSummary { id: r.get(0), name: r.get(1), archived: r.get(2) }).collect())
@@ -329,9 +306,9 @@ impl Db {
             .execute(&mut *tx)
             .await?
             .last_insert_rowid();
-        write_snapshot(&mut tx, id, &content).await?;
+        let current_snapshot_id = write_snapshot(&mut tx, id, &content).await?;
         tx.commit().await?;
-        self.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))
+        Ok(Recipe { id, archived: false, current_snapshot_id, content })
     }
 
     pub async fn get_recipe(&self, id: i64) -> Result<Option<Recipe>> {
@@ -345,20 +322,11 @@ impl Db {
         else {
             return Ok(None);
         };
-        let c: Content = serde_json::from_str(row.get(2))?;
         Ok(Some(Recipe {
             id,
             archived: row.get(0),
             current_snapshot_id: row.get(1),
-            name: c.name,
-            description: c.description,
-            source_url: c.source_url,
-            nutrition: c.nutrition,
-            tags: get_names(self, TAGS, id).await?,
-            categories: get_names(self, CATEGORIES, id).await?,
-            cookbooks: get_names(self, COOKBOOKS, id).await?,
-            ingredients: c.ingredients,
-            steps: c.steps,
+            content: serde_json::from_str(row.get(2))?,
         }))
     }
 

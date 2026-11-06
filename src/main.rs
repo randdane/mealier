@@ -5,15 +5,12 @@ use mealier::{Db, api};
 /// Resolves on ctrl-c or SIGTERM (the container stop signal).
 async fn shutdown() {
     let ctrl_c = async { tokio::signal::ctrl_c().await.expect("install ctrl-c handler") };
-    #[cfg(unix)]
     let term = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("install SIGTERM handler")
             .recv()
             .await;
     };
-    #[cfg(not(unix))]
-    let term = std::future::pending::<()>();
     tokio::select! {
         _ = ctrl_c => {}
         _ = term => {}
@@ -26,10 +23,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = match std::env::var_os("MEALIER_DATA_DIR") {
         Some(d) => PathBuf::from(d),
         None => {
-            let base = std::env::var_os("XDG_DATA_HOME")
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME unset")).join(".local/share"));
+            let base = match std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+                Some(x) => PathBuf::from(x),
+                None => PathBuf::from(std::env::var_os("HOME").ok_or("HOME unset")?).join(".local/share"),
+            };
             base.join("_r_/mealier")
         }
     };

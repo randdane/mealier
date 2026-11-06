@@ -161,3 +161,33 @@ async fn get_recipe_snapshots_missing_returns_404() {
     let (status, _) = send(&app, "GET", "/api/recipes/999/snapshots", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn get_recipes_q_filters_by_name_or_description() {
+    let db = Db::open_memory().await.unwrap();
+    db.create_recipe(mealier::RecipeInput { name: "Tomato Soup".into(), ..Default::default() }).await.unwrap();
+    db.create_recipe(mealier::RecipeInput { name: "Stew".into(), description: "with TOMATOES".into(), ..Default::default() })
+        .await
+        .unwrap();
+    db.create_recipe(mealier::RecipeInput { name: "Pie".into(), ..Default::default() }).await.unwrap();
+    let app = api::router(db);
+
+    let (status, body) = send(&app, "GET", "/api/recipes?q=tomato", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<_> = body.as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["Stew", "Tomato Soup"]);
+}
+
+#[tokio::test]
+async fn post_recipes_with_reversed_range_returns_422() {
+    let app = api::router(Db::open_memory().await.unwrap());
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/recipes",
+        Some(json!({"name": "Bread", "ingredients": [{"qty_min": 3.0, "qty_max": 2.0}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body["error"].is_string(), "{body}");
+}

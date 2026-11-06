@@ -30,10 +30,11 @@ async fn create(State(db): State<Db>, Json(input): Json<RecipeInput>) -> Result<
 struct ListParams {
     #[serde(default)]
     include_archived: bool,
+    q: Option<String>,
 }
 
 async fn list(State(db): State<Db>, Query(p): Query<ListParams>) -> Result<Json<Vec<RecipeSummary>>, Error> {
-    Ok(Json(db.list_recipes(p.include_archived).await?))
+    Ok(Json(db.list_recipes(p.include_archived, p.q.as_deref()).await?))
 }
 
 async fn get_one(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Recipe>, Error> {
