@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ heading }} - mealier{% endblock %}
+{% block content %}
+<h1>{{ heading }}</h1>
+<form method="post" action="{{ action }}">
+  <label class="block">Name <input type="text" name="name" value="{{ name }}" required></label>
+  <label class="block">Description <textarea name="description" rows="3">{{ description }}</textarea></label>
+  <label class="block">Ingredients (one per line) <textarea name="ingredients" rows="10">{{ ingredients }}</textarea></label>
+  <div class="buttons"><button type="submit">Save and review ingredients</button></div>
+</form>
+{% endblock %}

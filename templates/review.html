@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Review ingredients - mealier{% endblock %}
+{% block content %}
+<h1>Review ingredients: <a href="/recipes/{{ id }}">{{ name }}</a></h1>
+<p>Check each line. Pick a unit or food from the list, or type a new one; new units need a dimension, and a factor to grams or millilitres for mass and volume.</p>
+<form method="post" action="/recipes/{{ id }}/ingredients/review">
+  <table class="lines">
+    <thead><tr><th>Original</th><th>Amount</th><th>Unit</th><th>Food</th><th>Note</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td data-label="Original">
+          <input type="hidden" name="original_text" value="{{ r.original }}">{{ r.original }}
+          <span class="badge">{{ r.confidence }}</span>
+        </td>
+        <td data-label="Amount" class="actual">
+          <input type="number" name="qty_min" value="{{ r.qty_min }}" step="any" min="0" inputmode="decimal" aria-label="Amount">
+          <input type="number" name="qty_max" value="{{ r.qty_max }}" step="any" min="0" inputmode="decimal" aria-label="Amount, upper end of a range">
+        </td>
+        <td data-label="Unit">
+          <select name="unit_id" aria-label="Unit">
+            <option value="">(no unit)</option>
+            {% for u in units %}<option value="{{ u.id }}"{% if r.unit_id == u.id %} selected{% endif %}>{{ u.name }}</option>{% endfor %}
+          </select>
+          <input type="text" name="new_unit" placeholder="add new unit…" aria-label="New unit name">
+          <select name="new_unit_dimension" aria-label="New unit dimension">
+            <option>count</option><option>mass</option><option>volume</option><option>other</option>
+          </select>
+          <input type="number" name="new_unit_factor" step="any" min="0" placeholder="g or ml per unit" aria-label="New unit factor to grams or millilitres" inputmode="decimal">
+        </td>
+        <td data-label="Food">
+          <select name="food_id" aria-label="Food">
+            <option value="">(none)</option>
+            {% for f in foods %}<option value="{{ f.id }}"{% if r.food_id == f.id %} selected{% endif %}>{{ f.name }}</option>{% endfor %}
+          </select>
+          <input type="text" name="new_food" placeholder="add new food…" aria-label="New food name">
+        </td>
+        <td data-label="Note"><input type="text" name="note" value="{{ r.note }}" aria-label="Note"></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="buttons"><button type="submit">Confirm</button></div>
+</form>
+{% endblock %}

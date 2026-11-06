@@ -2,6 +2,7 @@
 {% block title %}Recipes - mealier{% endblock %}
 {% block content %}
 <h1>Recipes</h1>
+<p><a href="/recipes/new">New recipe</a></p>
 <form method="get" action="/" role="search">
   <input type="search" name="q" value="{{ q }}" placeholder="Search recipes" aria-label="Search recipes" autofocus
          hx-get="/" hx-trigger="input changed delay:300ms, search" hx-target="#list" hx-select="#list" hx-swap="outerHTML" hx-push-url="true">

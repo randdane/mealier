@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};
 use zip::ZipArchive;
 
+use crate::units::KNOWN_UNITS;
 use crate::recipes::{IngredientInput, Nutrition, RecipeInput, insert_recipe};
 use crate::{Db, Dimension, Error, Result};
 
@@ -96,25 +97,6 @@ fn aliases(b: &Backup, table: &str, parent: &str) -> HashMap<String, Vec<String>
     }
     m
 }
-
-/// Mass and volume units Mealie ships, by lowercase name or abbreviation:
-/// (names, dimension, grams or millilitres per unit).
-const KNOWN_UNITS: &[(&[&str], Dimension, f64)] = &[
-    (&["g", "gram", "grams"], Dimension::Mass, 1.0),
-    (&["kg", "kilogram", "kilograms"], Dimension::Mass, 1000.0),
-    (&["mg", "milligram", "milligrams"], Dimension::Mass, 0.001),
-    (&["oz", "ounce", "ounces"], Dimension::Mass, 28.349523125),
-    (&["lb", "lbs", "pound", "pounds"], Dimension::Mass, 453.59237),
-    (&["ml", "milliliter", "milliliters", "millilitre", "millilitres"], Dimension::Volume, 1.0),
-    (&["l", "liter", "liters", "litre", "litres"], Dimension::Volume, 1000.0),
-    (&["tsp", "teaspoon", "teaspoons"], Dimension::Volume, 4.92892159375),
-    (&["tbsp", "tablespoon", "tablespoons"], Dimension::Volume, 14.78676478125),
-    (&["c", "cup", "cups"], Dimension::Volume, 236.5882365),
-    (&["fl oz", "fluid ounce", "fluid ounces"], Dimension::Volume, 29.5735295625),
-    (&["pt", "pint", "pints"], Dimension::Volume, 473.176473),
-    (&["qt", "quart", "quarts"], Dimension::Volume, 946.352946),
-    (&["gal", "gallon", "gallons"], Dimension::Volume, 3785.411784),
-];
 
 fn classify(u: &MRow) -> (Dimension, Option<f64>) {
     for k in ["name", "abbreviation", "plural_name", "plural_abbreviation"] {

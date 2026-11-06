@@ -4,7 +4,7 @@
 <h1>{{ name }}</h1>
 {% if !description.is_empty() %}<p>{{ description }}</p>{% endif %}
 
-<p><a href="/recipes/{{ id }}/cook">Cook</a></p>
+<p><a href="/recipes/{{ id }}/cook">Cook</a> · <a href="/recipes/{{ id }}/edit">Edit</a> · <a href="/recipes/{{ id }}/ingredients/review">Review ingredients</a></p>
 
 <h2>Ingredients</h2>
 <ul>

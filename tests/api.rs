@@ -229,6 +229,7 @@ async fn openapi_lists_every_recipe_route() {
         "POST /api/batches/{id}/lines",
         "POST /api/batches/{id}/finish",
         "POST /api/batches/{id}/photos",
+        "POST /api/parse",
     ];
     expected.sort();
     assert_eq!(found, expected);
@@ -485,4 +486,23 @@ async fn cook_theme_post_rejects_unknown_themes_and_sets_the_cookie_for_known_on
 
     let (_, headers, _) = raw(&app, "POST", "/settings/cook-theme", Some("theme=normal&back=%2F%2Fevil.example")).await;
     assert_eq!(headers["location"], "/");
+}
+
+#[tokio::test]
+async fn post_parse_returns_a_parsed_entry_per_line() {
+    let db = Db::open_memory().await.unwrap();
+    let cup = db.add_unit("cup", mealier::Dimension::Volume, Some(236.5882365)).await.unwrap();
+    let flour = db.add_food("flour").await.unwrap();
+    let app = router_for(db);
+    let (status, body) = send(&app, "POST", "/api/parse", Some(json!({"lines": ["1 1/2 cups flour, sifted", "???"]}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!([
+            {"qty_min": 1.5, "qty_max": 1.5, "unit_id": cup, "food_id": flour, "note": "sifted",
+             "original_text": "1 1/2 cups flour, sifted", "confidence": "full"},
+            {"qty_min": null, "qty_max": null, "unit_id": null, "food_id": null, "note": "",
+             "original_text": "???", "confidence": "none"},
+        ])
+    );
 }

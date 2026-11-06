@@ -3,11 +3,14 @@ use std::path::Path;
 pub mod api;
 mod batches;
 mod import;
+mod parse;
 mod people;
 mod recipes;
+mod units;
 mod web;
 pub use batches::*;
 pub use import::*;
+pub use parse::*;
 pub use people::*;
 pub use recipes::*;
 

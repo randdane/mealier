@@ -9,12 +9,16 @@ use axum::routing::{get, post};
 use serde::Deserialize;
 
 use crate::api::{AppState, PHOTO_BODY_LIMIT, read_photo};
-use crate::{BatchInput, BatchLineInput, Db, Error, Result};
+use crate::{BatchInput, BatchLineInput, Db, Dimension, Error, IngredientInput, RecipeInput, Result, parse_line};
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(index))
+        .route("/recipes", post(create_recipe))
+        .route("/recipes/new", get(new_recipe_page))
         .route("/recipes/{id}", get(recipe_page))
+        .route("/recipes/{id}/edit", get(edit_recipe_page).post(edit_recipe))
+        .route("/recipes/{id}/ingredients/review", get(review_page).post(review_save))
         .route("/recipes/{id}/cook", get(cook_page))
         .route("/settings/cook-theme", post(set_theme))
         .route("/recipes/{id}/batches", post(start))
@@ -378,4 +382,243 @@ async fn image(State(s): State<AppState>, Path(name): Path<String>) -> impl Into
         Ok(bytes) => ([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "public, max-age=31536000, immutable")], bytes).into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "recipe_form.html")]
+struct RecipeForm {
+    heading: &'static str,
+    action: String,
+    name: String,
+    description: String,
+    ingredients: String,
+}
+
+async fn new_recipe_page() -> RecipeForm {
+    RecipeForm { heading: "New recipe", action: "/recipes".into(), name: String::new(), description: String::new(), ingredients: String::new() }
+}
+
+async fn edit_recipe_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<RecipeForm> {
+    let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
+    let lines: Vec<String> = r
+        .content
+        .ingredients
+        .iter()
+        .map(|i| if i.original_text.is_empty() { ingredient_line(i, 1.0) } else { i.original_text.clone() })
+        .collect();
+    Ok(RecipeForm {
+        heading: "Edit recipe",
+        action: format!("/recipes/{id}/edit"),
+        name: r.content.name,
+        description: r.content.description,
+        ingredients: lines.join("\n"),
+    })
+}
+
+#[derive(Deserialize)]
+struct RecipeFormData {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    ingredients: String,
+}
+
+/// Parsed form of a line: what `parse_line` found, or just the text when it found nothing.
+fn parsed_input(text: &str, units: &[crate::Unit], foods: &[crate::Food]) -> IngredientInput {
+    // step 9: LLM fallback for unparsed lines
+    let p = parse_line(text, units, foods);
+    let keep = p.confidence != crate::Confidence::None;
+    IngredientInput {
+        qty_min: p.qty_min.filter(|_| keep),
+        qty_max: p.qty_max.filter(|_| keep),
+        unit_id: p.unit_id,
+        food_id: p.food_id,
+        note: p.note,
+        original_text: p.original_text,
+    }
+}
+
+async fn create_recipe(State(db): State<Db>, axum::Form(f): axum::Form<RecipeFormData>) -> Result<Redirect> {
+    let (units, foods) = (db.units().await?, db.foods().await?);
+    let ingredients = f.ingredients.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| parsed_input(l, &units, &foods)).collect();
+    let r = db.create_recipe(RecipeInput { name: f.name, description: f.description, ingredients, ..Default::default() }).await?;
+    Ok(Redirect::to(&format!("/recipes/{}/ingredients/review", r.id)))
+}
+
+fn to_input(i: &crate::Ingredient) -> IngredientInput {
+    IngredientInput {
+        qty_min: i.qty_min,
+        qty_max: i.qty_max,
+        unit_id: i.unit_id,
+        food_id: i.food_id,
+        note: i.note.clone(),
+        original_text: i.original_text.clone(),
+    }
+}
+
+async fn edit_recipe(State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<RecipeFormData>) -> Result<Redirect> {
+    let old = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?.content;
+    let (units, foods) = (db.units().await?, db.foods().await?);
+    // A line left as it was keeps what the user already reviewed; only new or changed text is parsed.
+    let ingredients = f
+        .ingredients
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| match old.ingredients.iter().find(|i| i.original_text == l) {
+            Some(i) => to_input(i),
+            None => parsed_input(l, &units, &foods),
+        })
+        .collect();
+    db.update_recipe(
+        id,
+        RecipeInput {
+            name: f.name,
+            description: f.description,
+            source_url: old.source_url,
+            nutrition: old.nutrition,
+            tags: old.tags,
+            categories: old.categories,
+            cookbooks: old.cookbooks,
+            tools: old.tools,
+            ingredients,
+            steps: old.steps,
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/recipes/{id}/ingredients/review")))
+}
+
+struct ReviewRow {
+    original: String,
+    confidence: &'static str,
+    qty_min: String,
+    qty_max: String,
+    unit_id: i64,
+    food_id: i64,
+    note: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "review.html")]
+struct ReviewPage {
+    id: i64,
+    name: String,
+    rows: Vec<ReviewRow>,
+    units: Vec<crate::Unit>,
+    foods: Vec<crate::Food>,
+}
+
+async fn review_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<ReviewPage> {
+    let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
+    let rows = r
+        .content
+        .ingredients
+        .iter()
+        .map(|i| ReviewRow {
+            original: i.original_text.clone(),
+            confidence: match (i.food_id, i.qty_min) {
+                (Some(_), Some(_)) => "parsed",
+                (None, None) if i.unit_id.is_none() => "not parsed",
+                _ => "partly parsed",
+            },
+            qty_min: opt(i.qty_min),
+            qty_max: opt(i.qty_max),
+            unit_id: i.unit_id.unwrap_or(0),
+            food_id: i.food_id.unwrap_or(0),
+            note: i.note.clone(),
+        })
+        .collect();
+    Ok(ReviewPage { id, name: r.content.name, rows, units: db.units().await?, foods: db.foods().await? })
+}
+
+#[derive(Default)]
+struct ReviewLine {
+    input: IngredientInput,
+    new_unit: String,
+    new_unit_dimension: String,
+    new_unit_factor: Option<f64>,
+    new_food: String,
+}
+
+/// Flat pairs, one run of fields per row, each run starting at `original_text`.
+fn parse_review(body: &[u8]) -> Result<Vec<ReviewLine>> {
+    let pairs: Vec<(String, String)> = serde_urlencoded::from_bytes(body).map_err(|e| Error::Validation(e.to_string()))?;
+    let mut rows: Vec<ReviewLine> = Vec::new();
+    for (k, v) in pairs {
+        if k == "original_text" {
+            rows.push(ReviewLine { input: IngredientInput { original_text: v, ..Default::default() }, ..Default::default() });
+            continue;
+        }
+        let Some(row) = rows.last_mut() else { continue };
+        match k.as_str() {
+            "qty_min" => row.input.qty_min = number(&v)?,
+            "qty_max" => row.input.qty_max = number(&v)?,
+            "unit_id" => row.input.unit_id = id_of(&v)?,
+            "food_id" => row.input.food_id = id_of(&v)?,
+            "note" => row.input.note = v,
+            "new_unit" => row.new_unit = v.trim().to_string(),
+            "new_unit_dimension" => row.new_unit_dimension = v,
+            "new_unit_factor" => row.new_unit_factor = number(&v)?,
+            "new_food" => row.new_food = v.trim().to_string(),
+            _ => {}
+        }
+    }
+    Ok(rows)
+}
+
+async fn review_save(State(db): State<Db>, Path(id): Path<i64>, body: axum::body::Bytes) -> Result<Redirect> {
+    let old = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?.content;
+    let mut rows = parse_review(&body)?;
+    // The same new name typed on several rows is created once; an existing name is reused.
+    let mut units = db.units().await?;
+    let mut foods = db.foods().await?;
+    for row in &mut rows {
+        if !row.new_unit.is_empty() {
+            let wanted = row.new_unit.to_lowercase();
+            let known = units.iter().find(|u| std::iter::once(&u.name).chain(&u.aliases).any(|n| n.to_lowercase() == wanted));
+            row.input.unit_id = Some(match known {
+                Some(u) => u.id,
+                None => {
+                    let dim: Dimension = serde_json::from_value(row.new_unit_dimension.clone().into())
+                        .map_err(|_| Error::Validation(format!("'{}' is not a unit dimension", row.new_unit_dimension)))?;
+                    let factor = row.new_unit_factor.filter(|_| matches!(dim, Dimension::Mass | Dimension::Volume));
+                    let new_id = db.add_unit(&row.new_unit, dim, factor).await?;
+                    units.push(crate::Unit { id: new_id, name: row.new_unit.clone(), aliases: vec![], dimension: dim, factor });
+                    new_id
+                }
+            });
+        }
+        if !row.new_food.is_empty() {
+            let wanted = row.new_food.to_lowercase();
+            let known = foods.iter().find(|f| std::iter::once(&f.name).chain(&f.aliases).any(|n| n.to_lowercase() == wanted));
+            row.input.food_id = Some(match known {
+                Some(f) => f.id,
+                None => {
+                    let new_id = db.add_food(&row.new_food).await?;
+                    foods.push(crate::Food { id: new_id, name: row.new_food.clone(), aliases: vec![] });
+                    new_id
+                }
+            });
+        }
+    }
+    // ponytail: units/foods created above stay if update_recipe then rejects the rows; harmless extras, one tx if it matters.
+    db.update_recipe(
+        id,
+        RecipeInput {
+            name: old.name,
+            description: old.description,
+            source_url: old.source_url,
+            nutrition: old.nutrition,
+            tags: old.tags,
+            categories: old.categories,
+            cookbooks: old.cookbooks,
+            tools: old.tools,
+            ingredients: rows.into_iter().map(|r| r.input).collect(),
+            steps: old.steps,
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/recipes/{id}")))
 }

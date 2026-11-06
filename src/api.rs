@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use axum::extract::FromRef;
 
-use crate::{Batch, BatchDetail, BatchInput, BatchLineInput, Db, Error, Recipe, RecipeInput, RecipeSummary, Snapshot, SnapshotSummary};
+use crate::{Parsed, Batch, BatchDetail, BatchInput, BatchLineInput, Db, Error, Recipe, RecipeInput, RecipeSummary, Snapshot, SnapshotSummary};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
@@ -22,7 +22,7 @@ pub struct ErrorBody {
 #[derive(OpenApi)]
 #[openapi(paths(
     create, list, get_one, update, archive, snapshots, get_snapshot,
-    start_batch, list_batches, get_batch, put_batch, add_line, finish_batch, add_photo
+    start_batch, list_batches, get_batch, put_batch, add_line, finish_batch, add_photo, parse
 ))]
 struct ApiDoc;
 
@@ -249,6 +249,21 @@ pub(crate) async fn read_photo(mut form: Multipart) -> Result<axum::body::Bytes,
     Err(Error::Validation("form field `photo` is missing".into()))
 }
 
+#[derive(Deserialize, ToSchema)]
+struct ParseRequest {
+    /// Ingredient lines as written, one string each.
+    lines: Vec<String>,
+}
+
+#[utoipa::path(
+    post, path = "/api/parse", request_body = ParseRequest,
+    responses((status = 200, description = "One parse result per line, in order, matched against the current units and foods", body = [Parsed]))
+)]
+async fn parse(State(db): State<Db>, Json(req): Json<ParseRequest>) -> Result<Json<Vec<Parsed>>, Error> {
+    let (units, foods) = (db.units().await?, db.foods().await?);
+    Ok(Json(req.lines.iter().map(|l| crate::parse_line(l, &units, &foods)).collect()))
+}
+
 /// What every handler can reach: the database and the content-addressed images dir.
 #[derive(Clone)]
 pub struct AppState {
@@ -277,6 +292,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/batches/{id}/finish", post(finish_batch))
         // Axum's default body limit is 2 MB; the store enforces the real 10 MB (+ multipart framing).
         .route("/api/batches/{id}/photos", post(add_photo).layer(DefaultBodyLimit::max(PHOTO_BODY_LIMIT)))
+        .route("/api/parse", post(parse))
         .route("/api/openapi.json", get(openapi))
         .merge(crate::web::routes())
         .with_state(state)
