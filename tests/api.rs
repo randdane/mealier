@@ -191,3 +191,33 @@ async fn post_recipes_with_reversed_range_returns_422() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body["error"].is_string(), "{body}");
 }
+
+#[tokio::test]
+async fn openapi_lists_every_recipe_route() {
+    let app = api::router(Db::open_memory().await.unwrap());
+    let (status, body) = send(&app, "GET", "/api/openapi.json", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["openapi"].as_str().unwrap().starts_with("3."), "{body}");
+
+    let mut found: Vec<String> = Vec::new();
+    for (path, item) in body["paths"].as_object().unwrap() {
+        for method in ["get", "post", "put", "patch", "delete"] {
+            if item.get(method).is_some() {
+                found.push(format!("{} {}", method.to_uppercase(), path));
+            }
+        }
+    }
+    found.sort();
+
+    let mut expected = vec![
+        "GET /api/recipes",
+        "POST /api/recipes",
+        "GET /api/recipes/{id}",
+        "PUT /api/recipes/{id}",
+        "POST /api/recipes/{id}/archive",
+        "GET /api/recipes/{id}/snapshots",
+        "GET /api/snapshots/{id}",
+    ];
+    expected.sort();
+    assert_eq!(found, expected);
+}

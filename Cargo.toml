@@ -12,6 +12,7 @@ thiserror = "2"
 axum = "0.8.9"
 zip = { version = "9.4.1", default-features = false, features = ["deflate"] }
 sha2 = "0.11.1"
+utoipa = "6"
 
 [dev-dependencies]
 http-body-util = "0.1.5"

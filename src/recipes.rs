@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, Sqlite, Transaction};
+use utoipa::ToSchema;
 
 use crate::{Db, Error, Result};
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Nutrition {
     pub calories: Option<f64>,
     pub protein_g: Option<f64>,
@@ -11,7 +12,7 @@ pub struct Nutrition {
     pub carbs_g: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(default)]
 pub struct IngredientInput {
     pub qty_min: Option<f64>,
@@ -22,7 +23,7 @@ pub struct IngredientInput {
     pub original_text: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(default)]
 pub struct RecipeInput {
     pub name: String,
@@ -39,7 +40,7 @@ pub struct RecipeInput {
 
 /// An ingredient line as stored in a snapshot: unit and food names (and the
 /// unit factor) are copied, so later renames do not change history.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Ingredient {
     pub qty_min: Option<f64>,
     pub qty_max: Option<f64>,
@@ -53,7 +54,7 @@ pub struct Ingredient {
 }
 
 /// Everything a snapshot freezes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Content {
     pub name: String,
     pub description: String,
@@ -68,7 +69,7 @@ pub struct Content {
     pub steps: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct Recipe {
     pub id: i64,
     pub archived: bool,
@@ -77,21 +78,21 @@ pub struct Recipe {
     pub content: Content,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct RecipeSummary {
     pub id: i64,
     pub name: String,
     pub archived: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct SnapshotSummary {
     pub id: i64,
     pub recipe_id: i64,
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct Snapshot {
     pub id: i64,
     pub recipe_id: i64,
