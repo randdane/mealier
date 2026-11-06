@@ -7,7 +7,8 @@ import json, os, secrets, struct, sys, time, uuid, zlib
 import urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 
-BASE = "https://mealie.example.com"
+# The Mealie to seed, e.g. https://mealie.example.com; kept out of the repo.
+BASE = os.environ["MEALIE_URL"].rstrip("/")
 P = "mealier-fixture"
 XDG = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
 TOKEN = (XDG / "_r_/mealie/token").read_text().strip()

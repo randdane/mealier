@@ -5,7 +5,7 @@ Usage: python3 -I cleanup-mealie-fixture.py [--yes]   (dry run without --yes)"""
 import json, os, sys, urllib.error, urllib.request
 from pathlib import Path
 
-BASE, P = "https://mealie.example.com", "mealier-fixture"
+BASE, P = os.environ["MEALIE_URL"].rstrip("/"), "mealier-fixture"
 XDG = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
 TOKEN = (XDG / "_r_/mealie/token").read_text().strip()
 YES = "--yes" in sys.argv
