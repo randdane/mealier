@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Households - mealier{% endblock %}
+{% block content %}
+<h1>Groups and households</h1>
+<p><small>A group shares its recipes, units and foods; groups share nothing with each other. A household has its own meal plan, shopping lists and batches. New users join the default household.</small></p>
+<ul>
+{% for g in groups %}
+  <li>
+    <strong>{{ g.name }}</strong> <small>{{ g.slug }}</small>
+    <ul>
+    {% for h in g.households %}
+      <li>{{ h.name }}{% if h.is_default %} <span class="badge">default</span>{% endif %}</li>
+    {% else %}<li><em>no households</em></li>{% endfor %}
+    </ul>
+  </li>
+{% endfor %}
+</ul>
+
+<h2>New group</h2>
+<form method="post" action="/settings/households/groups" class="stack">
+  <label>Name <input type="text" name="name" required></label>
+  <button type="submit">Add group</button>
+</form>
+
+<h2>New household</h2>
+<form method="post" action="/settings/households/households" class="stack">
+  <label>Group
+    <select name="group_id">{% for g in groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}</select>
+  </label>
+  <label>Name <input type="text" name="name" required></label>
+  <button type="submit">Add household</button>
+</form>
+
+<h2>Default household</h2>
+<form method="post" action="/settings/households/default" class="stack">
+  <label>Household
+    <select name="household_id">{% for o in households %}<option value="{{ o.id }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}</select>
+  </label>
+  <button type="submit">Make default</button>
+</form>
+
+<h2>Users</h2>
+<ul>
+{% for u in users %}<li><strong>{{ u.username }}</strong> <small>{{ u.household }}</small></li>{% endfor %}
+</ul>
+<form method="post" action="/settings/households/move-user" class="stack">
+  <label>User
+    <select name="user_id">{% for u in users %}<option value="{{ u.id }}">{{ u.username }}</option>{% endfor %}</select>
+  </label>
+  <label>Household
+    <select name="household_id">{% for o in households %}<option value="{{ o.id }}">{{ o.label }}</option>{% endfor %}</select>
+  </label>
+  <button type="submit">Move</button>
+</form>
+<p><small>Moving a user into another group is allowed. Their old household keeps its plan, lists and batches; they see the new household's.</small></p>
+{% endblock %}

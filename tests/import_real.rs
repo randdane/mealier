@@ -27,7 +27,13 @@ async fn the_real_backup_imports_with_matching_counts() {
     let report = import_mealie_backup(&db, &path, images.path()).await.unwrap();
 
     assert_eq!((report.recipes, report.foods, report.units), (want("recipes"), want("ingredient_foods"), want("ingredient_units")));
-    assert_eq!(db.list_recipes(true, None).await.unwrap().len(), want("recipes"));
-    assert_eq!(db.foods().await.unwrap().len(), want("ingredient_foods"));
-    assert_eq!(db.units().await.unwrap().len(), want("ingredient_units"));
+    let rows = |t: &'static str| {
+        let db = db.clone();
+        async move { sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {t}")).fetch_one(db.pool()).await.unwrap() as usize }
+    };
+    assert_eq!(rows("recipes").await, want("recipes"));
+    assert_eq!(rows("foods").await, want("ingredient_foods"));
+    assert_eq!(rows("units").await, want("ingredient_units"));
+    assert_eq!(rows("groups").await, want("groups"));
+    assert_eq!(rows("households").await, want("households"));
 }

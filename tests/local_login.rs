@@ -1,4 +1,5 @@
 //! S28: the break-glass local admin.
+mod common;
 use std::sync::OnceLock;
 
 use axum::Router;
@@ -160,7 +161,7 @@ async fn a_disabled_local_admin_cannot_sign_in() {
 #[tokio::test]
 async fn an_imported_user_named_admin_is_not_taken_over() {
     let db = Db::open_memory().await.unwrap();
-    let imported: i64 = sqlx::query_scalar("INSERT INTO users (username, email, role) VALUES ('admin', 'old-admin@x', 'user') RETURNING id").fetch_one(db.pool()).await.unwrap();
+    let imported: i64 = sqlx::query_scalar("INSERT INTO users (username, email, role, household_id) VALUES ('admin', 'old-admin@x', 'user', ?) RETURNING id").bind(common::household(&db).await).fetch_one(db.pool()).await.unwrap();
     let app = app_with(&db, enabled());
     let (status, h, _) = post(&app, "/login/local", &login_form(PASSWORD)).await;
     assert_eq!(status, StatusCode::SEE_OTHER);

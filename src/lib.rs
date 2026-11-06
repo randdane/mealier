@@ -3,6 +3,7 @@ use std::path::Path;
 pub mod api;
 mod auth;
 mod guard;
+mod households;
 mod login;
 mod oidc;
 mod batches;
@@ -13,6 +14,7 @@ mod parse;
 mod people;
 mod planner;
 mod recipes;
+mod tenancy;
 mod units;
 mod webhooks;
 mod urlimport;
@@ -28,6 +30,7 @@ pub use parse::*;
 pub use people::*;
 pub use planner::*;
 pub use recipes::*;
+pub use tenancy::{Group, Household, Scope};
 pub use urlimport::*;
 pub use webhooks::*;
 
@@ -81,8 +84,27 @@ impl Db {
     }
 
     async fn connect(opts: SqliteConnectOptions, max: u32) -> Result<Db> {
-        let pool = SqlitePoolOptions::new().max_connections(max).connect_with(opts).await?;
+        // Migrations rebuild tables (0009), and SQLite ignores `PRAGMA foreign_keys` inside the
+        // transaction a migration runs in, so they run on one connection that has it off.
+        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts.clone().foreign_keys(false)).await?;
+        let applied = || async { sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations").fetch_one(&pool).await.unwrap_or(0) };
+        let before = applied().await;
         sqlx::migrate!().run(&pool).await?;
+        if applied().await != before {
+            let broken = sqlx::query("PRAGMA foreign_key_check").fetch_all(&pool).await?.len();
+            if broken > 0 {
+                return Err(Error::Validation(format!("a migration left {broken} dangling references; the database was not opened")));
+            }
+        }
+        // An in-memory database lives and dies with its one connection, so that one is kept and switched on.
+        // A file database gets a fresh pool, every connection of which starts with foreign keys on.
+        let pool = if max == 1 {
+            sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+            pool
+        } else {
+            pool.close().await;
+            SqlitePoolOptions::new().max_connections(max).connect_with(opts).await?
+        };
         Ok(Db { pool, notifier: Notifier::from_env() })
     }
 

@@ -7,7 +7,7 @@ use utoipa::ToSchema;
 use sqlx::{Row, Sqlite, Transaction};
 
 use crate::import::image_hash;
-use crate::{Batch, Db, Error, Image, Result};
+use crate::{Batch, Db, Error, Image, Result, Scope};
 
 /// One row of the batch table. `recipe_*` is the snapshot's amount times the
 /// batch scale (empty for added lines); the rest is what was actually used.
@@ -94,10 +94,10 @@ fn normalise(l: &mut BatchLineInput) -> Result<()> {
     Ok(())
 }
 
-async fn check_refs(tx: &mut Transaction<'_, Sqlite>, l: &BatchLineInput) -> Result<()> {
+async fn check_refs(tx: &mut Transaction<'_, Sqlite>, sc: &Scope, l: &BatchLineInput) -> Result<()> {
     for (table, name, id) in [("units", "unit", l.unit_id), ("foods", "food", l.food_id), ("foods", "food", l.substitute_food_id)] {
         if let Some(id) = id {
-            let found = sqlx::query(&format!("SELECT 1 FROM {table} WHERE id = ?")).bind(id).fetch_optional(&mut **tx).await?;
+            let found = sqlx::query(&format!("SELECT 1 FROM {table} WHERE id = ? AND group_id = ?")).bind(id).bind(sc.group_id).fetch_optional(&mut **tx).await?;
             if found.is_none() {
                 return Err(Error::NotFound(name));
             }
@@ -124,11 +124,12 @@ async fn insert_added(tx: &mut Transaction<'_, Sqlite>, batch_id: i64, l: &Batch
 }
 
 impl Db {
-    pub async fn start_batch(&self, recipe_id: i64, scale: f64) -> Result<BatchDetail> {
+    pub async fn start_batch(&self, sc: &Scope, recipe_id: i64, scale: f64) -> Result<BatchDetail> {
         check_scale(scale)?;
-        let recipe = self.get_recipe(recipe_id).await?.ok_or(Error::NotFound("recipe"))?;
+        let recipe = self.get_recipe(sc, recipe_id).await?.ok_or(Error::NotFound("recipe"))?;
         let mut tx = self.pool.begin().await?;
-        let id = sqlx::query("INSERT INTO batches (status, recipe_id, snapshot_id, source, scale) VALUES ('planned', ?, ?, 'native', ?)")
+        let id = sqlx::query("INSERT INTO batches (household_id, status, recipe_id, snapshot_id, source, scale) VALUES (?, 'planned', ?, ?, 'native', ?)")
+            .bind(sc.household_id)
             .bind(recipe_id)
             .bind(recipe.current_snapshot_id)
             .bind(scale)
@@ -149,12 +150,13 @@ impl Db {
             .await?;
         }
         tx.commit().await?;
-        self.get_batch(id).await
+        self.get_batch(sc, id).await
     }
 
-    pub async fn get_batch(&self, id: i64) -> Result<BatchDetail> {
-        let row = sqlx::query("SELECT id, status, recipe_id, snapshot_id, source, made_on, scale, rating, notes FROM batches WHERE id = ?")
+    pub async fn get_batch(&self, sc: &Scope, id: i64) -> Result<BatchDetail> {
+        let row = sqlx::query("SELECT id, status, recipe_id, snapshot_id, source, made_on, scale, rating, notes FROM batches WHERE id = ? AND household_id = ?")
             .bind(id)
+            .bind(sc.household_id)
             .fetch_optional(&self.pool)
             .await?
             .ok_or(Error::NotFound("batch"))?;
@@ -170,18 +172,19 @@ impl Db {
             notes: row.get(8),
         };
         let snapshot = match batch.snapshot_id {
-            Some(s) => Some(self.snapshot(s).await?.content),
+            Some(s) => Some(self.snapshot(sc, s).await?.content),
             None => None,
         };
         let rows = sqlx::query(
             "SELECT l.id, l.position, l.added, l.qty_min, l.qty_max, l.unit_id, u.name, l.food_id, f.name,
                     l.substitution, l.substitute_food_id, sf.name
              FROM batch_lines l
-             LEFT JOIN units u ON u.id = l.unit_id
-             LEFT JOIN foods f ON f.id = l.food_id
-             LEFT JOIN foods sf ON sf.id = l.substitute_food_id
-             WHERE l.batch_id = ? ORDER BY l.id",
+             LEFT JOIN units u ON u.id = l.unit_id AND u.group_id = ?1
+             LEFT JOIN foods f ON f.id = l.food_id AND f.group_id = ?1
+             LEFT JOIN foods sf ON sf.id = l.substitute_food_id AND sf.group_id = ?1
+             WHERE l.batch_id = ?2 ORDER BY l.id",
         )
+        .bind(sc.group_id)
         .bind(id)
         .fetch_all(&self.pool)
         .await?;
@@ -227,7 +230,7 @@ impl Db {
             .collect();
         Ok(BatchDetail { batch, lines, photos })
     }
-    pub async fn update_batch(&self, id: i64, input: BatchInput) -> Result<BatchDetail> {
+    pub async fn update_batch(&self, sc: &Scope, id: i64, input: BatchInput) -> Result<BatchDetail> {
         check_scale(input.scale)?;
         if input.rating.is_some_and(|r| !(1..=5).contains(&r)) {
             return Err(Error::Validation("rating must be 1 to 5".into()));
@@ -239,12 +242,13 @@ impl Db {
                 return Err(Error::Validation("made_on must be a date as YYYY-MM-DD".into()));
             }
         }
-        let n = sqlx::query("UPDATE batches SET made_on = ?, scale = ?, rating = ?, notes = ? WHERE id = ?")
+        let n = sqlx::query("UPDATE batches SET made_on = ?, scale = ?, rating = ?, notes = ? WHERE id = ? AND household_id = ?")
             .bind(&input.made_on)
             .bind(input.scale)
             .bind(input.rating)
             .bind(&input.notes)
             .bind(id)
+            .bind(sc.household_id)
             .execute(&mut *tx)
             .await?;
         if n.rows_affected() == 0 {
@@ -263,19 +267,19 @@ impl Db {
                 if !added {
                     return Err(Error::Validation("a line from the recipe cannot be removed".into()));
                 }
-                sqlx::query("DELETE FROM batch_lines WHERE id = ?").bind(line_id).execute(&mut *tx).await?;
+                sqlx::query("DELETE FROM batch_lines WHERE id = ? AND batch_id = ?").bind(line_id).bind(id).execute(&mut *tx).await?;
             }
         }
         for mut line in input.lines {
             normalise(&mut line)?;
-            check_refs(&mut tx, &line).await?;
+            check_refs(&mut tx, sc, &line).await?;
             match line.id {
                 // A snapshot line keeps its food; only added lines choose one.
                 Some(lid) => {
                     sqlx::query(
                         "UPDATE batch_lines SET qty_min = ?, qty_max = ?, unit_id = ?, substitution = ?, substitute_food_id = ?,
                                 food_id = CASE WHEN added THEN ? ELSE food_id END
-                         WHERE id = ?",
+                         WHERE id = ? AND batch_id = ?",
                     )
                     .bind(line.qty_min)
                     .bind(line.qty_max)
@@ -284,6 +288,7 @@ impl Db {
                     .bind(line.substitute_food_id)
                     .bind(line.food_id)
                     .bind(lid)
+                    .bind(id)
                     .execute(&mut *tx)
                     .await?;
                 }
@@ -291,38 +296,39 @@ impl Db {
             }
         }
         tx.commit().await?;
-        self.get_batch(id).await
+        self.get_batch(sc, id).await
     }
-    pub async fn add_batch_line(&self, id: i64, mut line: BatchLineInput) -> Result<BatchDetail> {
+    pub async fn add_batch_line(&self, sc: &Scope, id: i64, mut line: BatchLineInput) -> Result<BatchDetail> {
         normalise(&mut line)?;
         let mut tx = self.pool.begin().await?;
-        if sqlx::query("SELECT 1 FROM batches WHERE id = ?").bind(id).fetch_optional(&mut *tx).await?.is_none() {
+        if sqlx::query("SELECT 1 FROM batches WHERE id = ? AND household_id = ?").bind(id).bind(sc.household_id).fetch_optional(&mut *tx).await?.is_none() {
             return Err(Error::NotFound("batch"));
         }
-        check_refs(&mut tx, &line).await?;
+        check_refs(&mut tx, sc, &line).await?;
         insert_added(&mut tx, id, &line).await?;
         tx.commit().await?;
-        self.get_batch(id).await
+        self.get_batch(sc, id).await
     }
 
-    pub async fn finish_batch(&self, id: i64) -> Result<BatchDetail> {
-        let n = sqlx::query("UPDATE batches SET status = 'done', made_on = COALESCE(made_on, date('now')) WHERE id = ? AND status = 'planned'")
+    pub async fn finish_batch(&self, sc: &Scope, id: i64) -> Result<BatchDetail> {
+        let n = sqlx::query("UPDATE batches SET status = 'done', made_on = COALESCE(made_on, date('now')) WHERE id = ? AND household_id = ? AND status = 'planned'")
             .bind(id)
+            .bind(sc.household_id)
             .execute(&self.pool)
             .await?;
         if n.rows_affected() == 0 {
-            self.get_batch(id).await?;
+            self.get_batch(sc, id).await?;
             return Err(Error::Validation("batch is already done".into()));
         }
-        let detail = self.get_batch(id).await?;
+        let detail = self.get_batch(sc, id).await?;
         let b = &detail.batch;
-        let recipe_name = self.get_recipe(b.recipe_id).await.ok().flatten().map(|r| r.content.name).unwrap_or_default();
+        let recipe_name = self.get_recipe(sc, b.recipe_id).await.ok().flatten().map(|r| r.content.name).unwrap_or_default();
         self.notify(crate::Event::BatchLogged { batch_id: id, recipe_id: b.recipe_id, recipe_name, rating: b.rating, made_on: b.made_on.clone() });
         Ok(detail)
     }
     /// Stores one photo for the batch (png, jpeg or webp by magic bytes).
     // ponytail: stored as uploaded; resize-on-upload (spec, Architecture) is still owed.
-    pub async fn add_batch_photo(&self, id: i64, images_dir: &Path, bytes: &[u8]) -> Result<Image> {
+    pub async fn add_batch_photo(&self, sc: &Scope, id: i64, images_dir: &Path, bytes: &[u8]) -> Result<Image> {
         let (mime, ext) = match bytes {
             [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, ..] => ("image/png", "png"),
             [0xff, 0xd8, 0xff, ..] => ("image/jpeg", "jpg"),
@@ -334,7 +340,7 @@ impl Db {
         }
         let hash = image_hash(bytes);
         let mut tx = self.pool.begin().await?;
-        if sqlx::query("SELECT 1 FROM batches WHERE id = ?").bind(id).fetch_optional(&mut *tx).await?.is_none() {
+        if sqlx::query("SELECT 1 FROM batches WHERE id = ? AND household_id = ?").bind(id).bind(sc.household_id).fetch_optional(&mut *tx).await?.is_none() {
             return Err(Error::NotFound("batch"));
         }
         let already = sqlx::query("SELECT 1 FROM batch_photos WHERE batch_id = ? AND hash = ?")

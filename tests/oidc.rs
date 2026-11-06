@@ -1,4 +1,5 @@
 //! S27: the OIDC code flow against an in-test mock identity provider.
+mod common;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -350,7 +351,7 @@ async fn configured_group_names_are_used() {
 // ---------- identity binding ----------
 
 async fn imported(db: &Db, username: &str, email: &str, role: &str) -> i64 {
-    sqlx::query_scalar("INSERT INTO users (username, email, full_name, role) VALUES (?, ?, 'Imported Ann', ?) RETURNING id").bind(username).bind(email).bind(role).fetch_one(db.pool()).await.unwrap()
+    sqlx::query_scalar("INSERT INTO users (username, email, full_name, role, household_id) VALUES (?, ?, 'Imported Ann', ?, ?) RETURNING id").bind(username).bind(email).bind(role).bind(common::household(db).await).fetch_one(db.pool()).await.unwrap()
 }
 
 #[tokio::test]

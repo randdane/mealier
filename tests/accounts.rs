@@ -1,4 +1,5 @@
 //! Users admin (API and page) and the per-user tokens page.
+mod common;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -22,7 +23,7 @@ async fn ctx() -> Ctx {
     let db = Db::open_memory().await.unwrap();
     let add = |n: &'static str, role: &'static str| {
         let db = db.clone();
-        async move { sqlx::query_scalar::<_, i64>("INSERT INTO users (username, email, role) VALUES (?, ?, ?) RETURNING id").bind(n).bind(format!("{n}@x")).bind(role).fetch_one(db.pool()).await.unwrap() }
+        async move { sqlx::query_scalar::<_, i64>("INSERT INTO users (username, email, role, household_id) VALUES (?, ?, ?, ?) RETURNING id").bind(n).bind(format!("{n}@x")).bind(role).bind(common::household(&db).await).fetch_one(db.pool()).await.unwrap() }
     };
     let (alice, root) = (add("alice", "user").await, add("root", "admin").await);
     let (a, r) = (db.create_session(alice).await.unwrap(), db.create_session(root).await.unwrap());

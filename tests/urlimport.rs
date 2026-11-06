@@ -27,10 +27,10 @@ fn page(file: &str) -> Page {
 
 async fn mapped(file: &str) -> (mealier::RecipeInput, Option<String>) {
     let db = Db::open_memory().await.unwrap();
-    db.add_unit("cup", Dimension::Volume, Some(236.588)).await.unwrap();
-    db.add_food("flour").await.unwrap();
+    db.add_unit(&common::scope(&db).await, "cup", Dimension::Volume, Some(236.588)).await.unwrap();
+    db.add_food(&common::scope(&db).await, "flour").await.unwrap();
     let ld = Chain::build("jsonld,microdata", None).unwrap().run(&page(file)).await.unwrap();
-    map_jsonld(&ld, "https://x.test/r", &db.units().await.unwrap(), &db.foods().await.unwrap()).unwrap()
+    map_jsonld(&ld, "https://x.test/r", &db.units(&common::scope(&db).await).await.unwrap(), &db.foods(&common::scope(&db).await).await.unwrap()).unwrap()
 }
 
 // S15

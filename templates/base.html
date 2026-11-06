@@ -8,7 +8,7 @@
 <script src="/static/htmx.min.js" defer></script>
 </head>
 <body class="{% block body_class %}{% endblock %}">
-{% block nav %}<header><a href="/">mealier</a> · <a href="/plan">Plan</a> · <a href="/lists">Lists</a> · <a href="/settings/tokens">Tokens</a> · <a href="/settings/users">Users</a> · <a href="/settings/webhooks">Webhooks</a> · <a href="/settings/llm">LLM</a>
+{% block nav %}<header><a href="/">mealier</a> · <a href="/plan">Plan</a> · <a href="/lists">Lists</a> · <a href="/settings/tokens">Tokens</a> · <a href="/settings/users">Users</a> · <a href="/settings/households">Households</a> · <a href="/settings/webhooks">Webhooks</a> · <a href="/settings/llm">LLM</a>
 <form method="post" action="/logout" class="inline"><button type="submit" class="quiet">Sign out</button></form></header>{% endblock %}
 <main>
 {% block content %}{% endblock %}

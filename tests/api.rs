@@ -51,9 +51,9 @@ async fn post_recipes_with_empty_name_returns_422_with_error() {
 #[tokio::test]
 async fn get_recipes_returns_200_and_honours_include_archived() {
     let db = Db::open_memory().await.unwrap();
-    db.create_recipe(mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
-    let gone = db.create_recipe(mealier::RecipeInput { name: "Stew".into(), ..Default::default() }).await.unwrap();
-    db.archive_recipe(gone.id).await.unwrap();
+    db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
+    let gone = db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Stew".into(), ..Default::default() }).await.unwrap();
+    db.archive_recipe(&common::scope(&db).await, gone.id).await.unwrap();
     let app = router_for(db).await;
 
     let (status, body) = send(&app, "GET", "/api/recipes?include_archived=false", None).await;
@@ -68,7 +68,7 @@ async fn get_recipes_returns_200_and_honours_include_archived() {
 #[tokio::test]
 async fn get_recipe_returns_200_with_the_recipe() {
     let db = Db::open_memory().await.unwrap();
-    let r = db.create_recipe(mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
+    let r = db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
     let app = router_for(db).await;
 
     let (status, body) = send(&app, "GET", &format!("/api/recipes/{}", r.id), None).await;
@@ -88,7 +88,7 @@ async fn get_recipe_missing_returns_404_with_error() {
 #[tokio::test]
 async fn put_recipe_returns_200_with_the_updated_recipe() {
     let db = Db::open_memory().await.unwrap();
-    let r = db.create_recipe(mealier::RecipeInput { name: "Pancakes".into(), ..Default::default() }).await.unwrap();
+    let r = db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Pancakes".into(), ..Default::default() }).await.unwrap();
     let app = router_for(db).await;
 
     let (status, body) =
@@ -110,7 +110,7 @@ async fn put_recipe_missing_returns_404() {
 #[tokio::test]
 async fn put_recipe_with_empty_name_returns_422() {
     let db = Db::open_memory().await.unwrap();
-    let r = db.create_recipe(mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
+    let r = db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
     let app = router_for(db).await;
     let (status, body) = send(&app, "PUT", &format!("/api/recipes/{}", r.id), Some(json!({"name": ""}))).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -120,7 +120,7 @@ async fn put_recipe_with_empty_name_returns_422() {
 #[tokio::test]
 async fn archive_returns_204_and_hides_the_recipe_from_the_default_list() {
     let db = Db::open_memory().await.unwrap();
-    let r = db.create_recipe(mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
+    let r = db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
     let app = router_for(db).await;
 
     let (status, _) = send(&app, "POST", &format!("/api/recipes/{}/archive", r.id), None).await;
@@ -132,7 +132,7 @@ async fn archive_returns_204_and_hides_the_recipe_from_the_default_list() {
 #[tokio::test]
 async fn get_recipe_snapshots_returns_200_newest_first() {
     let db = Db::open_memory().await.unwrap();
-    let r = db.create_recipe(mealier::RecipeInput { name: "Pancakes".into(), ..Default::default() }).await.unwrap();
+    let r = db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Pancakes".into(), ..Default::default() }).await.unwrap();
     let app = router_for(db).await;
     let (_, updated) = send(&app, "PUT", &format!("/api/recipes/{}", r.id), Some(json!({"name": "Waffles"}))).await;
 
@@ -146,7 +146,7 @@ async fn get_recipe_snapshots_returns_200_newest_first() {
 #[tokio::test]
 async fn get_snapshot_returns_200_with_its_content() {
     let db = Db::open_memory().await.unwrap();
-    let r = db.create_recipe(mealier::RecipeInput { name: "Pancakes".into(), ..Default::default() }).await.unwrap();
+    let r = db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Pancakes".into(), ..Default::default() }).await.unwrap();
     let app = router_for(db).await;
 
     let (status, body) = send(&app, "GET", &format!("/api/snapshots/{}", r.current_snapshot_id), None).await;
@@ -172,11 +172,11 @@ async fn get_recipe_snapshots_missing_returns_404() {
 #[tokio::test]
 async fn get_recipes_q_filters_by_name_or_description() {
     let db = Db::open_memory().await.unwrap();
-    db.create_recipe(mealier::RecipeInput { name: "Tomato Soup".into(), ..Default::default() }).await.unwrap();
-    db.create_recipe(mealier::RecipeInput { name: "Stew".into(), description: "with TOMATOES".into(), ..Default::default() })
+    db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Tomato Soup".into(), ..Default::default() }).await.unwrap();
+    db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Stew".into(), description: "with TOMATOES".into(), ..Default::default() })
         .await
         .unwrap();
-    db.create_recipe(mealier::RecipeInput { name: "Pie".into(), ..Default::default() }).await.unwrap();
+    db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Pie".into(), ..Default::default() }).await.unwrap();
     let app = router_for(db).await;
 
     let (status, body) = send(&app, "GET", "/api/recipes?q=tomato", None).await;
@@ -258,6 +258,13 @@ async fn openapi_lists_every_recipe_route() {
         "GET /api/users",
         "POST /api/users/{id}/disable",
         "POST /api/users/{id}/enable",
+        "PUT /api/users/{id}/household",
+        "GET /api/groups",
+        "POST /api/groups",
+        "GET /api/households",
+        "POST /api/households",
+        "GET /api/default-household",
+        "PUT /api/default-household",
     ];
     expected.sort();
     assert_eq!(found, expected);
@@ -278,7 +285,7 @@ async fn openapi_declares_the_bearer_scheme_and_requires_it_by_default() {
 async fn app_with_recipe() -> (Router, Db, i64) {
     let db = Db::open_memory().await.unwrap();
     let r = db
-        .create_recipe(mealier::RecipeInput {
+        .create_recipe(&common::scope(&db).await, mealier::RecipeInput {
             name: "Omelette".into(),
             ingredients: vec![mealier::IngredientInput { qty_min: Some(2.0), qty_max: Some(2.0), ..Default::default() }],
             ..Default::default()
@@ -316,7 +323,7 @@ async fn post_recipe_batches_for_a_missing_recipe_returns_404() {
 #[tokio::test]
 async fn get_batch_returns_200_and_404() {
     let (app, db, rid) = app_with_recipe().await;
-    let b = db.start_batch(rid, 1.0).await.unwrap();
+    let b = db.start_batch(&common::scope(&db).await, rid, 1.0).await.unwrap();
     let (status, body) = send(&app, "GET", &format!("/api/batches/{}", b.batch.id), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["id"], b.batch.id);
@@ -328,7 +335,7 @@ async fn get_batch_returns_200_and_404() {
 #[tokio::test]
 async fn put_batch_returns_200_with_the_saved_batch() {
     let (app, db, rid) = app_with_recipe().await;
-    let b = db.start_batch(rid, 1.0).await.unwrap();
+    let b = db.start_batch(&common::scope(&db).await, rid, 1.0).await.unwrap();
     let line = b.lines[0].id;
     let put = json!({"scale": 1, "rating": 5, "notes": "good", "made_on": "2026-11-02",
                      "lines": [{"id": line, "qty_min": 3, "substitution": "duck eggs"}]});
@@ -342,7 +349,7 @@ async fn put_batch_returns_200_with_the_saved_batch() {
 #[tokio::test]
 async fn put_batch_with_rating_6_returns_422() {
     let (app, db, rid) = app_with_recipe().await;
-    let b = db.start_batch(rid, 1.0).await.unwrap();
+    let b = db.start_batch(&common::scope(&db).await, rid, 1.0).await.unwrap();
     let put = json!({"scale": 1, "rating": 6, "lines": [{"id": b.lines[0].id}]});
     let (status, body) = send(&app, "PUT", &format!("/api/batches/{}", b.batch.id), Some(put)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -359,7 +366,7 @@ async fn put_batch_missing_returns_404() {
 #[tokio::test]
 async fn post_batch_lines_returns_201_with_the_added_line() {
     let (app, db, rid) = app_with_recipe().await;
-    let b = db.start_batch(rid, 1.0).await.unwrap();
+    let b = db.start_batch(&common::scope(&db).await, rid, 1.0).await.unwrap();
     let (status, body) = send(&app, "POST", &format!("/api/batches/{}/lines", b.batch.id), Some(json!({"qty_min": 1, "substitution": "pinch of salt"}))).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["lines"].as_array().unwrap().len(), 2);
@@ -369,7 +376,7 @@ async fn post_batch_lines_returns_201_with_the_added_line() {
 #[tokio::test]
 async fn post_batch_lines_with_negative_qty_returns_422_and_missing_batch_404() {
     let (app, db, rid) = app_with_recipe().await;
-    let b = db.start_batch(rid, 1.0).await.unwrap();
+    let b = db.start_batch(&common::scope(&db).await, rid, 1.0).await.unwrap();
     let (status, _) = send(&app, "POST", &format!("/api/batches/{}/lines", b.batch.id), Some(json!({"qty_min": -1}))).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (status, _) = send(&app, "POST", "/api/batches/999/lines", Some(json!({}))).await;
@@ -379,7 +386,7 @@ async fn post_batch_lines_with_negative_qty_returns_422_and_missing_batch_404() 
 #[tokio::test]
 async fn post_batch_finish_returns_200_done_then_422_the_second_time() {
     let (app, db, rid) = app_with_recipe().await;
-    let b = db.start_batch(rid, 1.0).await.unwrap();
+    let b = db.start_batch(&common::scope(&db).await, rid, 1.0).await.unwrap();
     let uri = format!("/api/batches/{}/finish", b.batch.id);
     let (status, body) = send(&app, "POST", &uri, None).await;
     assert_eq!(status, StatusCode::OK);
@@ -400,8 +407,8 @@ async fn post_batch_finish_missing_returns_404() {
 #[tokio::test]
 async fn get_recipe_batches_returns_200_newest_first_and_404_for_a_missing_recipe() {
     let (app, db, rid) = app_with_recipe().await;
-    let first = db.start_batch(rid, 1.0).await.unwrap().batch.id;
-    let second = db.start_batch(rid, 2.0).await.unwrap().batch.id;
+    let first = db.start_batch(&common::scope(&db).await, rid, 1.0).await.unwrap().batch.id;
+    let second = db.start_batch(&common::scope(&db).await, rid, 2.0).await.unwrap().batch.id;
     let (status, body) = send(&app, "GET", &format!("/api/recipes/{rid}/batches"), None).await;
     assert_eq!(status, StatusCode::OK);
     let ids: Vec<i64> = body.as_array().unwrap().iter().map(|b| b["id"].as_i64().unwrap()).collect();
@@ -433,8 +440,8 @@ const PNG: &[u8] = b"\x89PNG\r\n\x1a\nhello";
 #[tokio::test]
 async fn post_batch_photos_returns_201_and_stores_the_file() {
     let db = Db::open_memory().await.unwrap();
-    let rid = db.create_recipe(mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap().id;
-    let b = db.start_batch(rid, 1.0).await.unwrap().batch.id;
+    let rid = db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap().id;
+    let b = db.start_batch(&common::scope(&db).await, rid, 1.0).await.unwrap().batch.id;
     let dir = tempfile::tempdir().unwrap();
     common::sign_in(&db).await;
     let app = api::router(api::AppState { db: db.clone(), images_dir: dir.path().to_path_buf() });
@@ -449,7 +456,7 @@ async fn post_batch_photos_returns_201_and_stores_the_file() {
 #[tokio::test]
 async fn post_batch_photos_rejects_non_images_a_missing_field_and_a_sixth_photo_with_422() {
     let (app, db, rid) = app_with_recipe().await;
-    let b = db.start_batch(rid, 1.0).await.unwrap().batch.id;
+    let b = db.start_batch(&common::scope(&db).await, rid, 1.0).await.unwrap().batch.id;
     let uri = format!("/api/batches/{b}/photos");
     let (status, _) = upload(&app, &uri, "photo", b"not an image").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -470,7 +477,7 @@ async fn post_batch_photos_rejects_non_images_a_missing_field_and_a_sixth_photo_
 #[tokio::test]
 async fn post_batch_photos_over_10_mb_returns_422() {
     let (app, db, rid) = app_with_recipe().await;
-    let b = db.start_batch(rid, 1.0).await.unwrap().batch.id;
+    let b = db.start_batch(&common::scope(&db).await, rid, 1.0).await.unwrap().batch.id;
     let mut big = PNG.to_vec();
     big.resize(10 * 1024 * 1024 + 1, 0);
     let (status, _) = upload(&app, &format!("/api/batches/{b}/photos"), "photo", &big).await;
@@ -534,8 +541,8 @@ async fn cook_theme_post_rejects_unknown_themes_and_saves_known_ones_to_the_sign
 #[tokio::test]
 async fn post_parse_returns_a_parsed_entry_per_line() {
     let db = Db::open_memory().await.unwrap();
-    let cup = db.add_unit("cup", mealier::Dimension::Volume, Some(236.5882365)).await.unwrap();
-    let flour = db.add_food("flour").await.unwrap();
+    let cup = db.add_unit(&common::scope(&db).await, "cup", mealier::Dimension::Volume, Some(236.5882365)).await.unwrap();
+    let flour = db.add_food(&common::scope(&db).await, "flour").await.unwrap();
     let app = router_for(db).await;
     let (status, body) = send(&app, "POST", "/api/parse", Some(json!({"lines": ["1 1/2 cups flour, sifted", "???"]}))).await;
     assert_eq!(status, StatusCode::OK);
@@ -555,11 +562,11 @@ async fn post_parse_returns_a_parsed_entry_per_line() {
 /// A router with one recipe (id 1, 100 g flour) and one shopping list (id 1).
 async fn planner_app() -> (Router, i64) {
     let db = Db::open_memory().await.unwrap();
-    let g = db.add_unit("g", mealier::Dimension::Mass, Some(1.0)).await.unwrap();
-    let flour = db.add_food("flour").await.unwrap();
+    let g = db.add_unit(&common::scope(&db).await, "g", mealier::Dimension::Mass, Some(1.0)).await.unwrap();
+    let flour = db.add_food(&common::scope(&db).await, "flour").await.unwrap();
     let ingredients = vec![mealier::IngredientInput { qty_min: Some(100.0), qty_max: Some(100.0), unit_id: Some(g), food_id: Some(flour), ..Default::default() }];
-    db.create_recipe(mealier::RecipeInput { name: "Bread".into(), ingredients, ..Default::default() }).await.unwrap();
-    db.create_list("Weekly").await.unwrap();
+    db.create_recipe(&common::scope(&db).await, mealier::RecipeInput { name: "Bread".into(), ingredients, ..Default::default() }).await.unwrap();
+    db.create_list(&common::scope(&db).await, "Weekly").await.unwrap();
     (router_for(db).await, flour)
 }
 

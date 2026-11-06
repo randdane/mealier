@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::fetch::Fetcher;
-use crate::{Db, Error, Food, IngredientInput, Nutrition, Recipe, RecipeInput, Result, Unit};
+use crate::{Db, Error, Food, IngredientInput, Nutrition, Recipe, RecipeInput, Result, Scope, Unit};
 
 pub struct Page {
     pub url: String,
@@ -334,27 +334,27 @@ impl ImportService {
         })
     }
 
-    pub async fn import(&self, db: &Db, images_dir: &Path, url: &str) -> Result<Recipe> {
-        Ok(self.import_suggested(db, images_dir, url).await?.0)
+    pub async fn import(&self, db: &Db, sc: &Scope, images_dir: &Path, url: &str) -> Result<Recipe> {
+        Ok(self.import_suggested(db, sc, images_dir, url).await?.0)
     }
 
     /// `import`, plus the indices of the ingredient lines the LLM filled in (for the review screen).
-    pub async fn import_suggested(&self, db: &Db, images_dir: &Path, url: &str) -> Result<(Recipe, Vec<usize>)> {
-        self.import_inner(db, images_dir, url).await.inspect_err(|e| {
+    pub async fn import_suggested(&self, db: &Db, sc: &Scope, images_dir: &Path, url: &str) -> Result<(Recipe, Vec<usize>)> {
+        self.import_inner(db, sc, images_dir, url).await.inspect_err(|e| {
             db.notify(crate::Event::ImportFailed { url: url.into(), reason: e.to_string() });
             eprintln!("mealier: import_failed url={url} reason={e}");
         })
     }
 
-    async fn import_inner(&self, db: &Db, images_dir: &Path, url: &str) -> Result<(Recipe, Vec<usize>)> {
+    async fn import_inner(&self, db: &Db, sc: &Scope, images_dir: &Path, url: &str) -> Result<(Recipe, Vec<usize>)> {
         let f = self.fetcher.get(url).await?;
         let page = Page { url: url.into(), final_url: f.final_url.to_string(), html: String::from_utf8_lossy(&f.body).into_owned() };
         let ld = self.chain.run(&page).await.ok_or_else(|| Error::Validation("no recipe found on that page".into()))?;
-        let (units, foods) = (db.units().await?, db.foods().await?);
+        let (units, foods) = (db.units(sc).await?, db.foods(sc).await?);
         let (mut input, image) = map_jsonld(&ld, &page.final_url, &units, &foods).ok_or_else(|| Error::Validation("no recipe found on that page".into()))?;
         let all = vec![true; input.ingredients.len()];
         let suggested = self.fill_lines(&mut input.ingredients, &all, &units, &foods).await;
-        let recipe = db.create_recipe(input).await?;
+        let recipe = db.create_recipe(sc, input).await?;
         if let Some(img) = image {
             // A missing or bad image never fails the import.
             if let Err(e) = self.attach_image(db, images_dir, recipe.id, &img).await {

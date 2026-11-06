@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
-use crate::{Db, Error, OidcConfig, SESSION_COOKIE, User};
+use crate::{Db, Error, OidcConfig, SESSION_COOKIE, Scope, User};
 
 pub struct AuthConfig {
     /// `MEALIER_BASE_URL`: the public URL; its origin is what a form POST must come from.
@@ -89,6 +89,15 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentUser {
     }
 }
 
+/// The tenant a handler may touch. Taking this as an argument is how a handler gets at group- or
+/// household-scoped data: the store methods all want one.
+impl<S: Send + Sync> FromRequestParts<S> for Scope {
+    type Rejection = Error;
+    async fn from_request_parts(parts: &mut Parts, s: &S) -> Result<Self, Error> {
+        Ok(Scope::from(&CurrentUser::from_request_parts(parts, s).await?.user))
+    }
+}
+
 /// A signed-in admin. Taking this as an argument is what makes a handler admin-only.
 pub(crate) struct Admin;
 
@@ -127,7 +136,7 @@ fn is_public(path: &str) -> bool {
 
 /// Belt over the router: the admin-only areas are refused here even if a handler forgets `Admin`.
 fn is_admin_area(path: &str) -> bool {
-    ["/api/webhooks", "/settings/webhooks", "/api/users", "/settings/users", "/api/llm", "/settings/llm"].iter().any(|p| path == *p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
+    ["/api/webhooks", "/settings/webhooks", "/api/users", "/settings/users", "/api/llm", "/settings/llm", "/api/groups", "/api/households", "/api/default-household", "/settings/households"].iter().any(|p| path == *p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
 }
 
 pub(crate) fn session_cookie_value(headers: &HeaderMap) -> Option<&str> {

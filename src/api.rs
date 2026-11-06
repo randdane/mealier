@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use axum::extract::FromRef;
 
-use crate::{Webhook, WebhookInput, EntryInput, ItemInput, MealPlanEntry, ShoppingList, ShoppingListSummary, ImportService, Parsed, Batch, BatchDetail, BatchInput, BatchLineInput, Db, Error, Recipe, RecipeInput, RecipeSummary, Snapshot, SnapshotSummary};
+use crate::{Scope, Webhook, WebhookInput, EntryInput, ItemInput, MealPlanEntry, ShoppingList, ShoppingListSummary, ImportService, Parsed, Batch, BatchDetail, BatchInput, BatchLineInput, Db, Error, Recipe, RecipeInput, RecipeSummary, Snapshot, SnapshotSummary};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
@@ -28,7 +28,9 @@ pub struct ErrorBody {
     get_lists, create_list, get_list, add_list_item, put_item, delete_item, list_add_recipe, list_add_batch,
     list_webhooks, create_webhook, get_webhook, put_webhook, delete_webhook, test_webhook,
     get_llm, test_llm, nutrition_estimate,
-    crate::login::me, crate::login::list_users, crate::login::disable_user, crate::login::enable_user
+    crate::login::me, crate::login::list_users, crate::login::disable_user, crate::login::enable_user,
+    crate::households::list_groups, crate::households::create_group, crate::households::list_households, crate::households::create_household,
+    crate::households::get_default, crate::households::put_default, crate::households::move_user
 ), modifiers(&BearerScheme), security(("bearer" = [])))]
 struct ApiDoc;
 
@@ -72,8 +74,8 @@ impl IntoResponse for Error {
         (status = 422, description = "Invalid recipe", body = ErrorBody),
     )
 )]
-async fn create(State(db): State<Db>, Json(input): Json<RecipeInput>) -> Result<(StatusCode, Json<Recipe>), Error> {
-    Ok((StatusCode::CREATED, Json(db.create_recipe(input).await?)))
+async fn create(sc: Scope, State(db): State<Db>, Json(input): Json<RecipeInput>) -> Result<(StatusCode, Json<Recipe>), Error> {
+    Ok((StatusCode::CREATED, Json(db.create_recipe(&sc, input).await?)))
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -89,8 +91,8 @@ struct ListParams {
     get, path = "/api/recipes", params(ListParams),
     responses((status = 200, description = "Recipe summaries, sorted by name", body = [RecipeSummary]))
 )]
-async fn list(State(db): State<Db>, Query(p): Query<ListParams>) -> Result<Json<Vec<RecipeSummary>>, Error> {
-    Ok(Json(db.list_recipes(p.include_archived, p.q.as_deref()).await?))
+async fn list(sc: Scope, State(db): State<Db>, Query(p): Query<ListParams>) -> Result<Json<Vec<RecipeSummary>>, Error> {
+    Ok(Json(db.list_recipes(&sc, p.include_archived, p.q.as_deref()).await?))
 }
 
 #[utoipa::path(
@@ -101,8 +103,8 @@ async fn list(State(db): State<Db>, Query(p): Query<ListParams>) -> Result<Json<
         (status = 404, description = "No such recipe", body = ErrorBody),
     )
 )]
-async fn get_one(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Recipe>, Error> {
-    db.get_recipe(id).await?.map(Json).ok_or(Error::NotFound("recipe"))
+async fn get_one(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Recipe>, Error> {
+    db.get_recipe(&sc, id).await?.map(Json).ok_or(Error::NotFound("recipe"))
 }
 
 #[utoipa::path(
@@ -115,8 +117,8 @@ async fn get_one(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Recip
         (status = 422, description = "Invalid recipe", body = ErrorBody),
     )
 )]
-async fn update(State(db): State<Db>, Path(id): Path<i64>, Json(input): Json<RecipeInput>) -> Result<Json<Recipe>, Error> {
-    Ok(Json(db.update_recipe(id, input).await?))
+async fn update(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(input): Json<RecipeInput>) -> Result<Json<Recipe>, Error> {
+    Ok(Json(db.update_recipe(&sc, id, input).await?))
 }
 
 #[utoipa::path(
@@ -127,8 +129,8 @@ async fn update(State(db): State<Db>, Path(id): Path<i64>, Json(input): Json<Rec
         (status = 404, description = "No such recipe", body = ErrorBody),
     )
 )]
-async fn archive(State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
-    db.archive_recipe(id).await?;
+async fn archive(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
+    db.archive_recipe(&sc, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -140,8 +142,8 @@ async fn archive(State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode
         (status = 404, description = "No such recipe", body = ErrorBody),
     )
 )]
-async fn snapshots(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Vec<SnapshotSummary>>, Error> {
-    Ok(Json(db.snapshots(id).await?))
+async fn snapshots(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Vec<SnapshotSummary>>, Error> {
+    Ok(Json(db.snapshots(&sc, id).await?))
 }
 
 #[utoipa::path(
@@ -152,8 +154,8 @@ async fn snapshots(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Vec
         (status = 404, description = "No such snapshot", body = ErrorBody),
     )
 )]
-async fn get_snapshot(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Snapshot>, Error> {
-    Ok(Json(db.snapshot(id).await?))
+async fn get_snapshot(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Snapshot>, Error> {
+    Ok(Json(db.snapshot(&sc, id).await?))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -172,8 +174,8 @@ struct StartBatch {
         (status = 422, description = "Invalid scale", body = ErrorBody),
     )
 )]
-async fn start_batch(State(db): State<Db>, Path(id): Path<i64>, Json(b): Json<StartBatch>) -> Result<(StatusCode, Json<BatchDetail>), Error> {
-    Ok((StatusCode::CREATED, Json(db.start_batch(id, b.scale).await?)))
+async fn start_batch(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(b): Json<StartBatch>) -> Result<(StatusCode, Json<BatchDetail>), Error> {
+    Ok((StatusCode::CREATED, Json(db.start_batch(&sc, id, b.scale).await?)))
 }
 
 #[utoipa::path(
@@ -184,9 +186,9 @@ async fn start_batch(State(db): State<Db>, Path(id): Path<i64>, Json(b): Json<St
         (status = 404, description = "No such recipe", body = ErrorBody),
     )
 )]
-async fn list_batches(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Vec<Batch>>, Error> {
-    db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
-    Ok(Json(db.list_batches(id).await?))
+async fn list_batches(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Vec<Batch>>, Error> {
+    db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?;
+    Ok(Json(db.list_batches(&sc, id).await?))
 }
 
 #[utoipa::path(
@@ -197,8 +199,8 @@ async fn list_batches(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<
         (status = 404, description = "No such batch", body = ErrorBody),
     )
 )]
-async fn get_batch(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<BatchDetail>, Error> {
-    Ok(Json(db.get_batch(id).await?))
+async fn get_batch(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<BatchDetail>, Error> {
+    Ok(Json(db.get_batch(&sc, id).await?))
 }
 
 #[utoipa::path(
@@ -211,8 +213,8 @@ async fn get_batch(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Bat
         (status = 422, description = "Invalid rating, scale, date, quantity, or a recipe line was left out", body = ErrorBody),
     )
 )]
-async fn put_batch(State(db): State<Db>, Path(id): Path<i64>, Json(input): Json<BatchInput>) -> Result<Json<BatchDetail>, Error> {
-    Ok(Json(db.update_batch(id, input).await?))
+async fn put_batch(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(input): Json<BatchInput>) -> Result<Json<BatchDetail>, Error> {
+    Ok(Json(db.update_batch(&sc, id, input).await?))
 }
 
 #[utoipa::path(
@@ -225,8 +227,8 @@ async fn put_batch(State(db): State<Db>, Path(id): Path<i64>, Json(input): Json<
         (status = 422, description = "Invalid quantity", body = ErrorBody),
     )
 )]
-async fn add_line(State(db): State<Db>, Path(id): Path<i64>, Json(line): Json<BatchLineInput>) -> Result<(StatusCode, Json<BatchDetail>), Error> {
-    Ok((StatusCode::CREATED, Json(db.add_batch_line(id, line).await?)))
+async fn add_line(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(line): Json<BatchLineInput>) -> Result<(StatusCode, Json<BatchDetail>), Error> {
+    Ok((StatusCode::CREATED, Json(db.add_batch_line(&sc, id, line).await?)))
 }
 
 #[utoipa::path(
@@ -238,8 +240,8 @@ async fn add_line(State(db): State<Db>, Path(id): Path<i64>, Json(line): Json<Ba
         (status = 422, description = "Already done", body = ErrorBody),
     )
 )]
-async fn finish_batch(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<BatchDetail>, Error> {
-    Ok(Json(db.finish_batch(id).await?))
+async fn finish_batch(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<BatchDetail>, Error> {
+    Ok(Json(db.finish_batch(&sc, id).await?))
 }
 
 #[utoipa::path(
@@ -252,10 +254,10 @@ async fn finish_batch(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<
         (status = 422, description = "Not an accepted image, over 10 MB, field missing, or the batch already has 5 photos", body = ErrorBody),
     )
 )]
-async fn add_photo(State(s): State<AppState>, Path(id): Path<i64>, form: Multipart) -> Result<(StatusCode, Json<BatchDetail>), Error> {
+async fn add_photo(sc: Scope, State(s): State<AppState>, Path(id): Path<i64>, form: Multipart) -> Result<(StatusCode, Json<BatchDetail>), Error> {
     let bytes = read_photo(form).await?;
-    s.db.add_batch_photo(id, &s.images_dir, &bytes).await?;
-    Ok((StatusCode::CREATED, Json(s.db.get_batch(id).await?)))
+    s.db.add_batch_photo(&sc, id, &s.images_dir, &bytes).await?;
+    Ok((StatusCode::CREATED, Json(s.db.get_batch(&sc, id).await?)))
 }
 
 /// The bytes of the multipart field `photo`. Shared with the HTML upload form.
@@ -279,8 +281,8 @@ struct ParseRequest {
     post, path = "/api/parse", request_body = ParseRequest,
     responses((status = 200, description = "One parse result per line, in order, matched against the current units and foods", body = [Parsed]))
 )]
-async fn parse(State(db): State<Db>, Json(req): Json<ParseRequest>) -> Result<Json<Vec<Parsed>>, Error> {
-    let (units, foods) = (db.units().await?, db.foods().await?);
+async fn parse(sc: Scope, State(db): State<Db>, Json(req): Json<ParseRequest>) -> Result<Json<Vec<Parsed>>, Error> {
+    let (units, foods) = (db.units(&sc).await?, db.foods(&sc).await?);
     Ok(Json(req.lines.iter().map(|l| crate::parse_line(l, &units, &foods)).collect()))
 }
 
@@ -297,8 +299,8 @@ struct ImportRequest {
         (status = 422, description = "The URL was refused, could not be fetched, or the page has no recipe", body = ErrorBody),
     )
 )]
-async fn import_url(State(s): State<AppState>, Extension(svc): Extension<Arc<ImportService>>, Json(req): Json<ImportRequest>) -> Result<(StatusCode, Json<Recipe>), Error> {
-    Ok((StatusCode::CREATED, Json(svc.import(&s.db, &s.images_dir, &req.url).await?)))
+async fn import_url(sc: Scope, State(s): State<AppState>, Extension(svc): Extension<Arc<ImportService>>, Json(req): Json<ImportRequest>) -> Result<(StatusCode, Json<Recipe>), Error> {
+    Ok((StatusCode::CREATED, Json(svc.import(&s.db, &sc, &s.images_dir, &req.url).await?)))
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -316,9 +318,9 @@ struct PlanRange {
         (status = 422, description = "`from` or `to` missing", body = ErrorBody),
     )
 )]
-async fn get_plan(State(db): State<Db>, Query(r): Query<PlanRange>) -> Result<Json<Vec<MealPlanEntry>>, Error> {
+async fn get_plan(sc: Scope, State(db): State<Db>, Query(r): Query<PlanRange>) -> Result<Json<Vec<MealPlanEntry>>, Error> {
     let (Some(from), Some(to)) = (r.from, r.to) else { return Err(Error::Validation("from and to are required".into())) };
-    Ok(Json(db.meal_plan(&from, &to).await?))
+    Ok(Json(db.meal_plan(&sc, &from, &to).await?))
 }
 
 #[utoipa::path(
@@ -329,8 +331,8 @@ async fn get_plan(State(db): State<Db>, Query(r): Query<PlanRange>) -> Result<Js
         (status = 422, description = "Bad date or slot, no recipe or title, or the batch is not a planned batch of the recipe", body = ErrorBody),
     )
 )]
-async fn add_plan_entry(State(db): State<Db>, Json(i): Json<EntryInput>) -> Result<(StatusCode, Json<MealPlanEntry>), Error> {
-    Ok((StatusCode::CREATED, Json(db.add_entry(i).await?)))
+async fn add_plan_entry(sc: Scope, State(db): State<Db>, Json(i): Json<EntryInput>) -> Result<(StatusCode, Json<MealPlanEntry>), Error> {
+    Ok((StatusCode::CREATED, Json(db.add_entry(&sc, i).await?)))
 }
 
 #[utoipa::path(
@@ -341,22 +343,22 @@ async fn add_plan_entry(State(db): State<Db>, Json(i): Json<EntryInput>) -> Resu
         (status = 422, description = "Invalid entry", body = ErrorBody),
     )
 )]
-async fn put_plan_entry(State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<EntryInput>) -> Result<Json<MealPlanEntry>, Error> {
-    Ok(Json(db.update_entry(id, i).await?))
+async fn put_plan_entry(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<EntryInput>) -> Result<Json<MealPlanEntry>, Error> {
+    Ok(Json(db.update_entry(&sc, id, i).await?))
 }
 
 #[utoipa::path(
     delete, path = "/api/meal-plan/{id}", params(("id" = i64, Path, description = "Entry id")),
     responses((status = 204, description = "Entry deleted"), (status = 404, description = "No such entry", body = ErrorBody))
 )]
-async fn delete_plan_entry(State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
-    db.delete_entry(id).await?;
+async fn delete_plan_entry(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
+    db.delete_entry(&sc, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(get, path = "/api/shopping-lists", responses((status = 200, description = "All lists", body = [ShoppingListSummary])))]
-async fn get_lists(State(db): State<Db>) -> Result<Json<Vec<ShoppingListSummary>>, Error> {
-    Ok(Json(db.shopping_lists().await?))
+async fn get_lists(sc: Scope, State(db): State<Db>) -> Result<Json<Vec<ShoppingListSummary>>, Error> {
+    Ok(Json(db.shopping_lists(&sc).await?))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -368,16 +370,16 @@ struct NewList {
     post, path = "/api/shopping-lists", request_body = NewList,
     responses((status = 201, description = "List created", body = ShoppingListSummary), (status = 422, description = "Empty name", body = ErrorBody))
 )]
-async fn create_list(State(db): State<Db>, Json(l): Json<NewList>) -> Result<(StatusCode, Json<ShoppingListSummary>), Error> {
-    Ok((StatusCode::CREATED, Json(db.create_list(&l.name).await?)))
+async fn create_list(sc: Scope, State(db): State<Db>, Json(l): Json<NewList>) -> Result<(StatusCode, Json<ShoppingListSummary>), Error> {
+    Ok((StatusCode::CREATED, Json(db.create_list(&sc, &l.name).await?)))
 }
 
 #[utoipa::path(
     get, path = "/api/shopping-lists/{id}", params(("id" = i64, Path, description = "List id")),
     responses((status = 200, description = "The list and its items", body = ShoppingList), (status = 404, description = "No such list", body = ErrorBody))
 )]
-async fn get_list(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<ShoppingList>, Error> {
-    Ok(Json(db.shopping_list(id).await?))
+async fn get_list(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<ShoppingList>, Error> {
+    Ok(Json(db.shopping_list(&sc, id).await?))
 }
 
 #[utoipa::path(
@@ -388,8 +390,8 @@ async fn get_list(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Shop
         (status = 422, description = "No food or note, or an invalid amount", body = ErrorBody),
     )
 )]
-async fn add_list_item(State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<ItemInput>) -> Result<(StatusCode, Json<crate::ShoppingItem>), Error> {
-    Ok((StatusCode::CREATED, Json(db.add_item(id, i).await?)))
+async fn add_list_item(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<ItemInput>) -> Result<(StatusCode, Json<crate::ShoppingItem>), Error> {
+    Ok((StatusCode::CREATED, Json(db.add_item(&sc, id, i).await?)))
 }
 
 #[utoipa::path(
@@ -400,16 +402,16 @@ async fn add_list_item(State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<
         (status = 422, description = "No food or note, or an invalid amount", body = ErrorBody),
     )
 )]
-async fn put_item(State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<ItemInput>) -> Result<Json<crate::ShoppingItem>, Error> {
-    Ok(Json(db.update_item(id, i).await?))
+async fn put_item(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<ItemInput>) -> Result<Json<crate::ShoppingItem>, Error> {
+    Ok(Json(db.update_item(&sc, id, i).await?))
 }
 
 #[utoipa::path(
     delete, path = "/api/shopping-list-items/{id}", params(("id" = i64, Path, description = "Item id")),
     responses((status = 204, description = "Item deleted"), (status = 404, description = "No such item", body = ErrorBody))
 )]
-async fn delete_item(State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
-    db.delete_item(id).await?;
+async fn delete_item(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
+    db.delete_item(&sc, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -428,8 +430,8 @@ struct ListRecipe {
         (status = 422, description = "Invalid scale", body = ErrorBody),
     )
 )]
-async fn list_add_recipe(State(db): State<Db>, Path(id): Path<i64>, Json(r): Json<ListRecipe>) -> Result<Json<ShoppingList>, Error> {
-    Ok(Json(db.add_recipe_to_list(id, r.recipe_id, r.scale).await?))
+async fn list_add_recipe(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(r): Json<ListRecipe>) -> Result<Json<ShoppingList>, Error> {
+    Ok(Json(db.add_recipe_to_list(&sc, id, r.recipe_id, r.scale).await?))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -444,8 +446,8 @@ struct ListBatch {
         (status = 404, description = "No such list or batch", body = ErrorBody),
     )
 )]
-async fn list_add_batch(State(db): State<Db>, Path(id): Path<i64>, Json(b): Json<ListBatch>) -> Result<Json<ShoppingList>, Error> {
-    Ok(Json(db.add_batch_to_list(id, b.batch_id).await?))
+async fn list_add_batch(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(b): Json<ListBatch>) -> Result<Json<ShoppingList>, Error> {
+    Ok(Json(db.add_batch_to_list(&sc, id, b.batch_id).await?))
 }
 
 // Admin only (`crate::Admin`); the guard middleware also refuses non-admins under /api/webhooks.
@@ -555,8 +557,8 @@ async fn test_llm(_: crate::Admin, Extension(svc): Extension<Arc<ImportService>>
         (status = 422, description = "No LLM is configured, or it failed", body = ErrorBody),
     )
 )]
-async fn nutrition_estimate(State(db): State<Db>, Extension(svc): Extension<Arc<ImportService>>, Path(id): Path<i64>) -> Result<Json<crate::NutritionEstimate>, Error> {
-    Ok(Json(crate::web::estimate_recipe(&db, &svc, id).await?))
+async fn nutrition_estimate(sc: Scope, State(db): State<Db>, Extension(svc): Extension<Arc<ImportService>>, Path(id): Path<i64>) -> Result<Json<crate::NutritionEstimate>, Error> {
+    Ok(Json(crate::web::estimate_recipe(&db, &sc, &svc, id).await?))
 }
 
 /// What every handler can reach: the database and the content-addressed images dir.
@@ -621,6 +623,7 @@ pub fn router_with_auth(state: AppState, import: ImportService, auth: crate::Aut
         .route("/api/users/{id}/enable", post(crate::login::enable_user))
         .merge(crate::web::routes())
         .merge(crate::login::routes())
+        .merge(crate::households::routes())
         .layer(Extension(Arc::new(import)))
         .layer(Extension(guard.auth.clone()))
         .layer(axum::middleware::from_fn_with_state(guard, crate::guard::guard))

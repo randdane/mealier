@@ -1,10 +1,12 @@
 //! S25: sessions, API tokens and disabling users, at the store.
+mod common;
 use mealier::{Db, Error, hash_token};
 
 async fn user(db: &Db, name: &str) -> i64 {
-    sqlx::query_scalar("INSERT INTO users (username, email, role) VALUES (?, ?, 'user') RETURNING id")
+    sqlx::query_scalar("INSERT INTO users (username, email, role, household_id) VALUES (?, ?, 'user', ?) RETURNING id")
         .bind(name)
         .bind(format!("{name}@x"))
+        .bind(common::household(db).await)
         .fetch_one(db.pool())
         .await
         .unwrap()

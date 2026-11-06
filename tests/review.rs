@@ -29,10 +29,10 @@ async fn app(db: Db) -> axum::Router {
 #[tokio::test]
 async fn review_form_post_updates_the_recipe_and_creates_a_new_food_and_unit() {
     let db = Db::open_memory().await.unwrap();
-    let cup = db.add_unit("cup", Dimension::Volume, Some(236.588)).await.unwrap();
-    let flour = db.add_food("flour").await.unwrap();
+    let cup = db.add_unit(&common::scope(&db).await, "cup", Dimension::Volume, Some(236.588)).await.unwrap();
+    let flour = db.add_food(&common::scope(&db).await, "flour").await.unwrap();
     let recipe = db
-        .create_recipe(RecipeInput {
+        .create_recipe(&common::scope(&db).await, RecipeInput {
             name: "Mix".into(),
             ingredients: vec![
                 IngredientInput { original_text: "2 cups flour".into(), ..Default::default() },
@@ -55,14 +55,14 @@ async fn review_form_post_updates_the_recipe_and_creates_a_new_food_and_unit() {
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(location.unwrap(), format!("/recipes/{}", recipe.id));
 
-    let got = db.get_recipe(recipe.id).await.unwrap().unwrap();
+    let got = db.get_recipe(&common::scope(&db).await, recipe.id).await.unwrap().unwrap();
     assert_ne!(got.current_snapshot_id, recipe.current_snapshot_id, "a new snapshot was written");
-    assert_eq!(db.snapshots(recipe.id).await.unwrap().len(), 2);
+    assert_eq!(db.snapshots(&common::scope(&db).await, recipe.id).await.unwrap().len(), 2);
 
-    let foods = db.foods().await.unwrap();
+    let foods = db.foods(&common::scope(&db).await).await.unwrap();
     let zorblax = foods.iter().find(|f| f.name == "zorblax").expect("new food created").id;
     let mace = foods.iter().find(|f| f.name == "mace").unwrap().id;
-    let units = db.units().await.unwrap();
+    let units = db.units(&common::scope(&db).await).await.unwrap();
     let ounce = units.iter().find(|u| u.name == "ounce").expect("new unit created");
     assert_eq!((ounce.dimension, ounce.factor), (Dimension::Mass, Some(28.35)));
     let pinch = units.iter().find(|u| u.name == "pinch").unwrap();
@@ -78,7 +78,7 @@ async fn review_form_post_updates_the_recipe_and_creates_a_new_food_and_unit() {
 #[tokio::test]
 async fn new_recipe_form_parses_lines_and_redirects_to_the_review_screen() {
     let db = Db::open_memory().await.unwrap();
-    db.add_food("flour").await.unwrap();
+    db.add_food(&common::scope(&db).await, "flour").await.unwrap();
     let app = app(db.clone()).await;
 
     let (status, location, _) = request(&app, "POST", "/recipes", Some("name=Bread&description=&ingredients=2+flour%0D%0A%0D%0Anonsense+line%0D%0A")).await;
@@ -87,7 +87,7 @@ async fn new_recipe_form_parses_lines_and_redirects_to_the_review_screen() {
     assert!(location.starts_with("/recipes/") && location.ends_with("/ingredients/review"), "{location}");
 
     let id: i64 = location.split('/').nth(2).unwrap().parse().unwrap();
-    let r = db.get_recipe(id).await.unwrap().unwrap();
+    let r = db.get_recipe(&common::scope(&db).await, id).await.unwrap().unwrap();
     assert_eq!(r.content.ingredients.len(), 2, "blank lines are dropped");
     assert_eq!(r.content.ingredients[0].food_name.as_deref(), Some("flour"));
     assert_eq!(r.content.ingredients[1].original_text, "nonsense line");

@@ -1,7 +1,9 @@
+mod common;
 use mealier::{Db, Error};
 
 async fn user(db: &Db) -> i64 {
-    sqlx::query_scalar("INSERT INTO users (username, email, role) VALUES ('a', 'a@x', 'user') RETURNING id")
+    sqlx::query_scalar("INSERT INTO users (username, email, role, household_id) VALUES ('a', 'a@x', 'user', ?) RETURNING id")
+        .bind(common::household(db).await)
         .fetch_one(db.pool())
         .await
         .unwrap()

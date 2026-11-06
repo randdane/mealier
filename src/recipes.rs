@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, Sqlite, Transaction};
 use utoipa::ToSchema;
 
-use crate::{Db, Error, Result};
+use crate::{Db, Error, Result, Scope};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Nutrition {
@@ -100,7 +100,7 @@ pub struct Snapshot {
     pub content: Content,
 }
 
-async fn build_content(tx: &mut Transaction<'_, Sqlite>, input: RecipeInput) -> Result<Content> {
+async fn build_content(tx: &mut Transaction<'_, Sqlite>, group_id: i64, input: RecipeInput) -> Result<Content> {
     if input.name.trim().is_empty() {
         return Err(Error::Validation("recipe name must not be empty".into()));
     }
@@ -121,8 +121,9 @@ async fn build_content(tx: &mut Transaction<'_, Sqlite>, input: RecipeInput) -> 
         }
         let unit = match i.unit_id {
             Some(id) => {
-                let row = sqlx::query("SELECT name, factor FROM units WHERE id = ?")
+                let row = sqlx::query("SELECT name, factor FROM units WHERE id = ? AND group_id = ?")
                     .bind(id)
+                    .bind(group_id)
                     .fetch_optional(&mut **tx)
                     .await?
                     .ok_or(Error::NotFound("unit"))?;
@@ -132,8 +133,9 @@ async fn build_content(tx: &mut Transaction<'_, Sqlite>, input: RecipeInput) -> 
         };
         let food_name = match i.food_id {
             Some(id) => Some(
-                sqlx::query_scalar::<_, String>("SELECT name FROM foods WHERE id = ?")
+                sqlx::query_scalar::<_, String>("SELECT name FROM foods WHERE id = ? AND group_id = ?")
                     .bind(id)
+                    .bind(group_id)
                     .fetch_optional(&mut **tx)
                     .await?
                     .ok_or(Error::NotFound("food"))?,
@@ -186,7 +188,7 @@ impl Dimension {
     }
 }
 
-/// Writes the snapshot, points the recipe at it, returns the snapshot id.
+/// Writes the snapshot, points the recipe at it, returns the snapshot id. The caller has already found the recipe in its group.
 async fn write_snapshot(tx: &mut Transaction<'_, Sqlite>, recipe_id: i64, c: &Content) -> Result<i64> {
     let snap = sqlx::query("INSERT INTO recipe_snapshots (recipe_id, content) VALUES (?, ?)")
         .bind(recipe_id)
@@ -218,9 +220,10 @@ fn snapshot_from(row: &sqlx::sqlite::SqliteRow) -> Result<Snapshot> {
 }
 
 /// Creates a recipe and its first snapshot inside the caller's transaction.
-pub(crate) async fn insert_recipe(tx: &mut Transaction<'_, Sqlite>, input: RecipeInput) -> Result<Recipe> {
-    let content = build_content(tx, input).await?;
-    let id = sqlx::query("INSERT INTO recipes (name) VALUES (?)")
+pub(crate) async fn insert_recipe(tx: &mut Transaction<'_, Sqlite>, group_id: i64, input: RecipeInput) -> Result<Recipe> {
+    let content = build_content(tx, group_id, input).await?;
+    let id = sqlx::query("INSERT INTO recipes (group_id, name) VALUES (?, ?)")
+        .bind(group_id)
         .bind(&content.name)
         .execute(&mut **tx)
         .await?
@@ -230,7 +233,13 @@ pub(crate) async fn insert_recipe(tx: &mut Transaction<'_, Sqlite>, input: Recip
 }
 
 impl Db {
-    pub async fn add_unit(&self, name: &str, dimension: Dimension, factor: Option<f64>) -> Result<i64> {
+    /// `NotFound` unless the recipe is in the caller's group. The first line of every recipe-keyed read.
+    pub(crate) async fn check_recipe(&self, sc: &Scope, id: i64) -> Result<()> {
+        let found = sqlx::query("SELECT 1 FROM recipes WHERE id = ? AND group_id = ?").bind(id).bind(sc.group_id).fetch_optional(&self.pool).await?;
+        found.map(|_| ()).ok_or(Error::NotFound("recipe"))
+    }
+
+    pub async fn add_unit(&self, sc: &Scope, name: &str, dimension: Dimension, factor: Option<f64>) -> Result<i64> {
         let ok = match dimension {
             Dimension::Mass | Dimension::Volume => factor.is_some_and(|f| f > 0.0),
             Dimension::Count | Dimension::Other => factor.is_none(),
@@ -240,7 +249,8 @@ impl Db {
                 "mass and volume units need a factor > 0; count and other units must have none".into(),
             ));
         }
-        Ok(sqlx::query("INSERT INTO units (name, dimension, factor) VALUES (?, ?, ?)")
+        Ok(sqlx::query("INSERT INTO units (group_id, name, dimension, factor) VALUES (?, ?, ?, ?)")
+            .bind(sc.group_id)
             .bind(name)
             .bind(dimension.as_str())
             .bind(factor)
@@ -249,31 +259,32 @@ impl Db {
             .last_insert_rowid())
     }
 
-    pub async fn rename_unit(&self, id: i64, name: &str) -> Result<()> {
-        let n = sqlx::query("UPDATE units SET name = ? WHERE id = ?").bind(name).bind(id).execute(&self.pool).await?;
+    pub async fn rename_unit(&self, sc: &Scope, id: i64, name: &str) -> Result<()> {
+        let n = sqlx::query("UPDATE units SET name = ? WHERE id = ? AND group_id = ?").bind(name).bind(id).bind(sc.group_id).execute(&self.pool).await?;
         if n.rows_affected() == 0 {
             return Err(Error::NotFound("unit"));
         }
         Ok(())
     }
 
-    pub async fn add_food(&self, name: &str) -> Result<i64> {
-        Ok(sqlx::query("INSERT INTO foods (name) VALUES (?)").bind(name).execute(&self.pool).await?.last_insert_rowid())
+    pub async fn add_food(&self, sc: &Scope, name: &str) -> Result<i64> {
+        Ok(sqlx::query("INSERT INTO foods (group_id, name) VALUES (?, ?)").bind(sc.group_id).bind(name).execute(&self.pool).await?.last_insert_rowid())
     }
 
-    pub async fn rename_food(&self, id: i64, name: &str) -> Result<()> {
-        let n = sqlx::query("UPDATE foods SET name = ? WHERE id = ?").bind(name).bind(id).execute(&self.pool).await?;
+    pub async fn rename_food(&self, sc: &Scope, id: i64, name: &str) -> Result<()> {
+        let n = sqlx::query("UPDATE foods SET name = ? WHERE id = ? AND group_id = ?").bind(name).bind(id).bind(sc.group_id).execute(&self.pool).await?;
         if n.rows_affected() == 0 {
             return Err(Error::NotFound("food"));
         }
         Ok(())
     }
 
-    pub async fn update_recipe(&self, id: i64, input: RecipeInput) -> Result<Recipe> {
+    pub async fn update_recipe(&self, sc: &Scope, id: i64, input: RecipeInput) -> Result<Recipe> {
         let mut tx = self.pool.begin().await?;
-        let content = build_content(&mut tx, input).await?;
-        let archived = sqlx::query_scalar::<_, bool>("SELECT archived FROM recipes WHERE id = ?")
+        let content = build_content(&mut tx, sc.group_id, input).await?;
+        let archived = sqlx::query_scalar::<_, bool>("SELECT archived FROM recipes WHERE id = ? AND group_id = ?")
             .bind(id)
+            .bind(sc.group_id)
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(Error::NotFound("recipe"))?;
@@ -282,52 +293,58 @@ impl Db {
         Ok(Recipe { id, archived, current_snapshot_id, content })
     }
 
-    pub async fn archive_recipe(&self, id: i64) -> Result<()> {
-        let n = sqlx::query("UPDATE recipes SET archived = 1 WHERE id = ?").bind(id).execute(&self.pool).await?;
+    pub async fn archive_recipe(&self, sc: &Scope, id: i64) -> Result<()> {
+        let n = sqlx::query("UPDATE recipes SET archived = 1 WHERE id = ? AND group_id = ?").bind(id).bind(sc.group_id).execute(&self.pool).await?;
         if n.rows_affected() == 0 {
             return Err(Error::NotFound("recipe"));
         }
         Ok(())
     }
 
-    pub async fn list_recipes(&self, include_archived: bool, q: Option<&str>) -> Result<Vec<RecipeSummary>> {
+    pub async fn list_recipes(&self, sc: &Scope, include_archived: bool, q: Option<&str>) -> Result<Vec<RecipeSummary>> {
         // Escape LIKE wildcards so the query is matched literally.
         let pattern = q.map(|q| format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
         let rows = sqlx::query(
             "SELECT id, name, archived FROM recipes
-             WHERE (archived = 0 OR ?1)
+             WHERE group_id = ?3 AND (archived = 0 OR ?1)
                AND (?2 IS NULL OR name LIKE ?2 ESCAPE '\\' OR description LIKE ?2 ESCAPE '\\')
              ORDER BY name, id",
         )
         .bind(include_archived)
         .bind(pattern)
+        .bind(sc.group_id)
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(|r| RecipeSummary { id: r.get(0), name: r.get(1), archived: r.get(2) }).collect())
     }
 
-    pub async fn snapshot(&self, id: i64) -> Result<Snapshot> {
-        let row = sqlx::query("SELECT id, recipe_id, created_at, content FROM recipe_snapshots WHERE id = ?")
-            .bind(id)
+    pub async fn snapshot(&self, sc: &Scope, id: i64) -> Result<Snapshot> {
+        let row = sqlx::query(
+            "SELECT s.id, s.recipe_id, s.created_at, s.content FROM recipe_snapshots s
+             JOIN recipes r ON r.id = s.recipe_id WHERE s.id = ? AND r.group_id = ?",
+        )
+        .bind(id)
+        .bind(sc.group_id)
             .fetch_optional(&self.pool)
             .await?
             .ok_or(Error::NotFound("snapshot"))?;
         snapshot_from(&row)
     }
 
-    pub async fn create_recipe(&self, input: RecipeInput) -> Result<Recipe> {
+    pub async fn create_recipe(&self, sc: &Scope, input: RecipeInput) -> Result<Recipe> {
         let mut tx = self.pool.begin().await?;
-        let recipe = insert_recipe(&mut tx, input).await?;
+        let recipe = insert_recipe(&mut tx, sc.group_id, input).await?;
         tx.commit().await?;
         Ok(recipe)
     }
 
-    pub async fn get_recipe(&self, id: i64) -> Result<Option<Recipe>> {
+    pub async fn get_recipe(&self, sc: &Scope, id: i64) -> Result<Option<Recipe>> {
         let Some(row) = sqlx::query(
             "SELECT r.archived, r.current_snapshot_id, s.content FROM recipes r
-             JOIN recipe_snapshots s ON s.id = r.current_snapshot_id WHERE r.id = ?",
+             JOIN recipe_snapshots s ON s.id = r.current_snapshot_id WHERE r.id = ? AND r.group_id = ?",
         )
         .bind(id)
+        .bind(sc.group_id)
         .fetch_optional(&self.pool)
         .await?
         else {
@@ -342,9 +359,13 @@ impl Db {
     }
 
     /// Newest first.
-    pub async fn snapshots(&self, recipe_id: i64) -> Result<Vec<SnapshotSummary>> {
-        let rows = sqlx::query("SELECT id, created_at FROM recipe_snapshots WHERE recipe_id = ? ORDER BY id DESC")
-            .bind(recipe_id)
+    pub async fn snapshots(&self, sc: &Scope, recipe_id: i64) -> Result<Vec<SnapshotSummary>> {
+        let rows = sqlx::query(
+            "SELECT s.id, s.created_at FROM recipe_snapshots s JOIN recipes r ON r.id = s.recipe_id
+             WHERE s.recipe_id = ? AND r.group_id = ? ORDER BY s.id DESC",
+        )
+        .bind(recipe_id)
+        .bind(sc.group_id)
             .fetch_all(&self.pool)
             .await?;
         // Every recipe has at least one snapshot, so none means no such recipe.

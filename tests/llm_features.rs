@@ -186,8 +186,8 @@ fn line(t: &str) -> IngredientInput {
 
 async fn tables() -> (Db, i64, i64) {
     let db = Db::open_memory().await.unwrap();
-    let cup = db.add_unit("cup", Dimension::Volume, Some(236.588)).await.unwrap();
-    let flour = db.add_food("flour").await.unwrap();
+    let cup = db.add_unit(&common::scope(&db).await, "cup", Dimension::Volume, Some(236.588)).await.unwrap();
+    let flour = db.add_food(&common::scope(&db).await, "flour").await.unwrap();
     (db, cup, flour)
 }
 
@@ -201,7 +201,7 @@ async fn fallback_fills_only_unparsed_lines_by_index_and_keeps_unknown_names_as_
         {"index": 42, "qty_min": 5, "qty_max": 5, "unit": null, "food": null, "note": "out of range"},
     ]});
     let (base, seen) = mock(vec![(200, reply(answer))]).await;
-    let (units, foods) = (db.units().await.unwrap(), db.foods().await.unwrap());
+    let (units, foods) = (db.units(&common::scope(&db).await).await.unwrap(), db.foods(&common::scope(&db).await).await.unwrap());
     let mut lines = vec![line("2 cups flour"), line("two cups sugar"), line("a handful of zorblax"), line("1 cup flour")];
     // As parsed_input leaves them: rules fill 0 and 3; 1 and 2 are untouched.
     for i in [0, 3] {
@@ -221,13 +221,13 @@ async fn fallback_fills_only_unparsed_lines_by_index_and_keeps_unknown_names_as_
     assert!(text.contains("1: two cups sugar") && text.contains("2: a handful of zorblax"), "{text}");
     assert!(!text.contains("2 cups flour") && !text.contains("1 cup flour"), "{text}");
     // Never auto-creates.
-    assert_eq!((db.units().await.unwrap().len(), db.foods().await.unwrap().len()), (units.len(), foods.len()));
+    assert_eq!((db.units(&common::scope(&db).await).await.unwrap().len(), db.foods(&common::scope(&db).await).await.unwrap().len()), (units.len(), foods.len()));
 }
 
 #[tokio::test]
 async fn fallback_leaves_lines_alone_when_the_llm_fails_or_has_nothing_to_do() {
     let (db, ..) = tables().await;
-    let (units, foods) = (db.units().await.unwrap(), db.foods().await.unwrap());
+    let (units, foods) = (db.units(&common::scope(&db).await).await.unwrap(), db.foods(&common::scope(&db).await).await.unwrap());
     let (base, seen) = mock(vec![(500, "{}".into())]).await;
     let mut lines = vec![line("a handful of zorblax")];
     assert!(fill_unparsed(&llm(&base), &mut lines, &units, &foods).await.is_empty());
@@ -242,7 +242,7 @@ async fn fallback_leaves_lines_alone_when_the_llm_fails_or_has_nothing_to_do() {
 #[tokio::test]
 async fn bad_numbers_from_the_model_are_dropped() {
     let (db, ..) = tables().await;
-    let (units, foods) = (db.units().await.unwrap(), db.foods().await.unwrap());
+    let (units, foods) = (db.units(&common::scope(&db).await).await.unwrap(), db.foods(&common::scope(&db).await).await.unwrap());
     let answer = json!({"lines": [{"index": 0, "qty_min": -3, "qty_max": "lots", "unit": null, "food": "zorblax", "note": ""}]});
     let (base, _) = mock(vec![(200, reply(answer))]).await;
     let mut lines = vec![line("zorblax")];
@@ -275,7 +275,7 @@ async fn form_save_uses_the_fallback_and_the_review_screen_marks_suggested_lines
 // S33
 async fn stew(db: &Db) -> i64 {
     let r = db
-        .create_recipe(RecipeInput { name: "Lentil Stew".into(), ingredients: vec![IngredientInput { qty_min: Some(1.0), original_text: "1 cup lentils".into(), ..Default::default() }], ..Default::default() })
+        .create_recipe(&common::scope(db).await, RecipeInput { name: "Lentil Stew".into(), ingredients: vec![IngredientInput { qty_min: Some(1.0), original_text: "1 cup lentils".into(), ..Default::default() }], ..Default::default() })
         .await
         .unwrap();
     r.id
@@ -296,7 +296,7 @@ async fn nutrition_estimate_returns_numbers_and_saves_nothing() {
     assert_eq!(s, 200, "{v}");
     assert_eq!(v, json!({"calories": 420.5, "protein": 21.0, "fat": 12.0, "carbs": 55.0}));
     assert_eq!(snapshots(&db).await, before);
-    assert_eq!(db.get_recipe(id).await.unwrap().unwrap().content.nutrition, None);
+    assert_eq!(db.get_recipe(&common::scope(&db).await, id).await.unwrap().unwrap().content.nutrition, None);
     let text = user_text(&seen, 0);
     assert!(text.contains("Lentil Stew") && text.contains("1 cup lentils"), "{text}");
 }
@@ -337,16 +337,16 @@ async fn edit_page_has_nutrition_fields_and_an_estimate_button_that_fills_them()
     let form = "name=Lentil+Stew&description=&ingredients=1+cup+lentils&calories=420.5&protein_g=21&fat_g=&carbs_g=55";
     let (s, ..) = send(&app, "POST", &format!("/recipes/{id}/edit"), Some(common::BEARER), Some(("application/x-www-form-urlencoded", form.into()))).await;
     assert_eq!(s, StatusCode::SEE_OTHER);
-    let n = db.get_recipe(id).await.unwrap().unwrap().content.nutrition.unwrap();
+    let n = db.get_recipe(&common::scope(&db).await, id).await.unwrap().unwrap().content.nutrition.unwrap();
     assert_eq!((n.calories, n.protein_g, n.fat_g, n.carbs_g), (Some(420.5), Some(21.0), None, Some(55.0)));
     let form = "name=Lentil+Stew&description=&ingredients=1+cup+lentils";
     send(&app, "POST", &format!("/recipes/{id}/edit"), Some(common::BEARER), Some(("application/x-www-form-urlencoded", form.into()))).await;
-    assert_eq!(db.get_recipe(id).await.unwrap().unwrap().content.nutrition.unwrap().calories, Some(420.5));
+    assert_eq!(db.get_recipe(&common::scope(&db).await, id).await.unwrap().unwrap().content.nutrition.unwrap().calories, Some(420.5));
 }
 
 // S34
 async fn user_token(db: &Db) -> String {
-    let id: i64 = sqlx::query_scalar("INSERT INTO users (username, email, role) VALUES ('plain', 'plain@x', 'user') RETURNING id").fetch_one(db.pool()).await.unwrap();
+    let id: i64 = sqlx::query_scalar("INSERT INTO users (username, email, role, household_id) VALUES ('plain', 'plain@x', 'user', ?) RETURNING id").bind(common::household(db).await).fetch_one(db.pool()).await.unwrap();
     sqlx::query("INSERT INTO api_tokens (hash, user_id, name) VALUES (?, ?, 'plain')").bind(mealier::hash_token("mlr_plain-user")).bind(id).execute(db.pool()).await.unwrap();
     "Bearer mlr_plain-user".into()
 }

@@ -2,8 +2,8 @@
 
 Status: agreed 2026-11-05, revised after a Codex review the same day. Revised
 2026-11-06: groups and households, full Mealie-export coverage, export and
-restore, share links, scheduled webhooks on demand. Steps 1–9 of the original
-build order are implemented; the remaining work is under "Build order".
+restore, share links, scheduled webhooks on demand. Steps 1–10 of the build
+order are implemented; the remaining work is under "Build order".
 
 ## Goal
 
@@ -76,6 +76,22 @@ Sablier stops the container when idle, so stop/start is routine.
 - A user sees only their own group's data, and only their own household's
   household-scoped data. Admins manage users and instance settings but see
   data under the same rules.
+- The scope (user, group, household, admin) is derived from the user's row on
+  every request, and every store call takes it. Something in another group or
+  household answers 404, the same as something that does not exist. Records
+  that point at others (a batch's recipe, a plan entry's recipe and batch, a
+  shopping item's unit, food and recipe) must be in the caller's scope too.
+  Images are served only to the group of a recipe that uses them or the
+  household of a batch that does.
+- Names (units, foods, tags, categories, tools, cookbooks) are unique per
+  group. Group and household preferences keep the fields mealier reads as
+  columns (`private_group`, `first_day_of_week`, `private_household`) and the
+  rest of Mealie's row as JSON.
+- The **default household** is an instance setting an admin chooses on
+  `/settings/households` (or `PUT /api/default-household`). OIDC users and the
+  local admin join it when their account is created; nothing is made until
+  needed, then "Home" in "Home". Admins create groups and households and move
+  users, across groups too; a moved user's old household keeps its data.
 
 ### Records
 
@@ -301,7 +317,13 @@ and referential-integrity checks. It is re-runnable. Cutover: compare counts and
 spot-check against Mealie, then point the vhost at mealier. Mealie's volume is
 kept until a later prune.
 
-Every table in a v3.28 backup is either mapped or skipped on purpose.
+Every table in a v3.28 backup is either mapped or skipped on purpose. Every group
+and household in the backup is imported; each record goes to its own group or
+household (a household-scoped record without a usable user goes to its group's
+first household), and the first household becomes the default. A backup whose
+records cross groups is refused whole. "Clean" means empty apart from the
+local admin and the empty "Home" made for them: the admin moves into the
+default household and Home is removed.
 
 **Mapped:** groups, households and their preferences; users (linked as in
 Auth; no passwords); recipes with ingredients, sections, instructions, ingredient
@@ -337,12 +359,11 @@ works.
 
 Done: 1. Schema, recipes, snapshots. 2. Mealie importer. 3. Batch log. 4. Cook
 mode. 5. URL importers and ingredient parser. 6. Meal planner and shopping list.
-7. Webhooks. 8. OIDC. 9. LLM fallbacks. Container image and CI.
+7. Webhooks. 8. OIDC. 9. LLM fallbacks. Container image and CI. 10. Groups and
+households.
 
 Remaining, in order:
 
-10. Groups and households: tenancy, scoping of every query, default household,
-    moving users.
 11. Review fixes: site-local IPv6, image hashes in snapshots, batch cook mode
     from the snapshot, export and restore, full recipe form, image decode and
     resize, one image module, one quantity-range helper, error mapping in one
@@ -355,3 +376,18 @@ Remaining, in order:
 15. Notifier events and scheduled webhooks.
 16. Fixture and importer coverage for every mapped table.
 17. Deploy (`stacks/mealier`).
+
+## STATUS
+
+2026-11-06, paused for the session token limit.
+
+- Phase: step 10 (groups and households) done and committed; 341 tests pass,
+  clippy clean.
+- In flight: nothing. No agents or servers running.
+- Blocked on the owner: nothing until deploy (step 17 needs a GitHub repo,
+  an Authentik application, and secrets).
+- Next: step 11, review fixes (list under "Build order"). Then 12–16 without
+  stopping unless a decision is needed.
+- Production Mealie still holds the `mealier-fixture` items and three extra
+  backups; `scripts/cleanup-mealie-fixture.py` removes the items after step 16
+  (step 16 adds more fixture data first).

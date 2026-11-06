@@ -9,7 +9,7 @@ use axum::routing::{get, post};
 use serde::Deserialize;
 
 use crate::api::{AppState, PHOTO_BODY_LIMIT, read_photo};
-use crate::{BatchInput, BatchLineInput, Db, Dimension, Error, IngredientInput, RecipeInput, Result, parse_line};
+use crate::{Scope, BatchInput, BatchLineInput, Db, Dimension, Error, IngredientInput, RecipeInput, Result, parse_line};
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
@@ -86,9 +86,9 @@ struct Search {
     q: Option<String>,
 }
 
-async fn index(State(db): State<Db>, Query(s): Query<Search>) -> Result<Index> {
+async fn index(sc: Scope, State(db): State<Db>, Query(s): Query<Search>) -> Result<Index> {
     let q = s.q.unwrap_or_default();
-    let recipes = db.list_recipes(false, Some(q.trim()).filter(|q| !q.is_empty())).await?;
+    let recipes = db.list_recipes(&sc, false, Some(q.trim()).filter(|q| !q.is_empty())).await?;
     Ok(Index { q, recipes })
 }
 
@@ -114,11 +114,11 @@ struct RecipePage {
     batches: Vec<BatchRow>,
 }
 
-async fn recipe_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<RecipePage> {
-    let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
+async fn recipe_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<RecipePage> {
+    let r = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?;
     let ingredients = r.content.ingredients.iter().map(|i| ingredient_line(i, 1.0)).collect();
     let batches = db
-        .list_batches(id)
+        .list_batches(&sc, id)
         .await?
         .into_iter()
         .map(|b| BatchRow {
@@ -129,7 +129,7 @@ async fn recipe_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<Recipe
             rating: b.rating.map(|r| r.to_string()).unwrap_or_default(),
         })
         .collect();
-    Ok(RecipePage { id, lists: db.shopping_lists().await?, slots: crate::SLOTS, today: db.day("now", 0).await?, name: r.content.name, description: r.content.description, ingredients, steps: r.content.steps, batches })
+    Ok(RecipePage { id, lists: db.shopping_lists(&sc).await?, slots: crate::SLOTS, today: db.day("now", 0).await?, name: r.content.name, description: r.content.description, ingredients, steps: r.content.steps, batches })
 }
 
 /// One ingredient as text, amounts times `scale`; falls back to the original text.
@@ -162,19 +162,20 @@ struct CookQuery {
 
 async fn cook_page(
     crate::CurrentUser { user, .. }: crate::CurrentUser,
+    sc: Scope,
     State(db): State<Db>,
     Path(id): Path<i64>,
     Query(q): Query<CookQuery>,
     uri: axum::http::Uri,
 ) -> Result<CookPage> {
-    let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
+    let r = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?;
     let scale = q.scale.unwrap_or(1.0);
     if !(scale.is_finite() && scale > 0.0) {
         return Err(Error::Validation("scale must be a positive number".into()));
     }
     let (ingredients, back) = match q.batch {
         Some(bid) => {
-            let b = db.get_batch(bid).await?;
+            let b = db.get_batch(&sc, bid).await?;
             if b.batch.recipe_id != id {
                 return Err(Error::NotFound("batch"));
             }
@@ -220,8 +221,8 @@ struct StartForm {
     scale: f64,
 }
 
-async fn start(State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<StartForm>) -> Result<Redirect> {
-    let b = db.start_batch(id, f.scale).await?;
+async fn start(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<StartForm>) -> Result<Redirect> {
+    let b = db.start_batch(&sc, id, f.scale).await?;
     Ok(Redirect::to(&format!("/batches/{}", b.batch.id)))
 }
 
@@ -257,10 +258,10 @@ struct BatchPage {
     lists: Vec<crate::ShoppingListSummary>,
 }
 
-async fn batch_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<BatchPage> {
-    let b = db.get_batch(id).await?;
-    let recipe = db.get_recipe(b.batch.recipe_id).await?.ok_or(Error::NotFound("recipe"))?;
-    let foods = if b.lines.iter().any(|l| l.added) { db.foods().await? } else { Vec::new() };
+async fn batch_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<BatchPage> {
+    let b = db.get_batch(&sc, id).await?;
+    let recipe = db.get_recipe(&sc, b.batch.recipe_id).await?.ok_or(Error::NotFound("recipe"))?;
+    let foods = if b.lines.iter().any(|l| l.added) { db.foods(&sc).await? } else { Vec::new() };
     let lines = b
         .lines
         .iter()
@@ -287,10 +288,10 @@ async fn batch_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<BatchPa
         rating: b.batch.rating.unwrap_or(0),
         notes: b.batch.notes,
         lines,
-        units: db.units().await?,
+        units: db.units(&sc).await?,
         foods,
         photos: b.photos.iter().map(|p| p.file_name()).collect(),
-        lists: db.shopping_lists().await?,
+        lists: db.shopping_lists(&sc).await?,
     })
 }
 
@@ -345,36 +346,36 @@ fn parse_form(body: &[u8]) -> Result<BatchInput> {
     Ok(input)
 }
 
-async fn save_form(db: &Db, id: i64, body: &[u8]) -> Result<()> {
-    db.update_batch(id, parse_form(body)?).await?;
+async fn save_form(db: &Db, sc: &Scope, id: i64, body: &[u8]) -> Result<()> {
+    db.update_batch(sc, id, parse_form(body)?).await?;
     Ok(())
 }
 
-async fn save(State(db): State<Db>, Path(id): Path<i64>, body: axum::body::Bytes) -> Result<Redirect> {
-    save_form(&db, id, &body).await?;
+async fn save(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, body: axum::body::Bytes) -> Result<Redirect> {
+    save_form(&db, &sc, id, &body).await?;
     Ok(Redirect::to(&format!("/batches/{id}")))
 }
 
-async fn add_line(State(db): State<Db>, Path(id): Path<i64>, body: axum::body::Bytes) -> Result<Redirect> {
-    save_form(&db, id, &body).await?;
-    db.add_batch_line(id, BatchLineInput::default()).await?;
+async fn add_line(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, body: axum::body::Bytes) -> Result<Redirect> {
+    save_form(&db, &sc, id, &body).await?;
+    db.add_batch_line(&sc, id, BatchLineInput::default()).await?;
     Ok(Redirect::to(&format!("/batches/{id}")))
 }
 
-async fn done(State(db): State<Db>, Path(id): Path<i64>, body: axum::body::Bytes) -> Result<Redirect> {
-    save_form(&db, id, &body).await?;
-    db.finish_batch(id).await?;
+async fn done(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, body: axum::body::Bytes) -> Result<Redirect> {
+    save_form(&db, &sc, id, &body).await?;
+    db.finish_batch(&sc, id).await?;
     Ok(Redirect::to(&format!("/batches/{id}")))
 }
 
-async fn photo(State(s): State<AppState>, Path(id): Path<i64>, form: Multipart) -> Result<Redirect> {
+async fn photo(sc: Scope, State(s): State<AppState>, Path(id): Path<i64>, form: Multipart) -> Result<Redirect> {
     let bytes = read_photo(form).await?;
-    s.db.add_batch_photo(id, &s.images_dir, &bytes).await?;
+    s.db.add_batch_photo(&sc, id, &s.images_dir, &bytes).await?;
     Ok(Redirect::to(&format!("/batches/{id}")))
 }
 
-/// Serves `<64 hex>.<png|jpg|webp|gif>` from the images dir; anything else is 404.
-async fn image(State(s): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
+/// Serves `<64 hex>.<png|jpg|webp|gif>` from the images dir to the tenant that uses the image; anything else is 404.
+async fn image(sc: Scope, State(s): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     let ok = name.split_once('.').and_then(|(h, ext)| {
         let hex = h.len() == 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
         let mime = match ext {
@@ -387,6 +388,10 @@ async fn image(State(s): State<AppState>, Path(name): Path<String>) -> impl Into
         hex.then_some(mime)
     });
     let Some(mime) = ok else { return StatusCode::NOT_FOUND.into_response() };
+    // The file name is the hash; whose it is, is in the database.
+    if !matches!(s.db.image_visible(&sc, name.split('.').next().unwrap_or_default()).await, Ok(true)) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     match tokio::fs::read(s.images_dir.join(&name)).await {
         Ok(bytes) => ([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "public, max-age=31536000, immutable")], bytes).into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
@@ -442,22 +447,22 @@ async fn new_recipe_page() -> Result<RecipeForm> {
 type Svc = axum::Extension<std::sync::Arc<crate::ImportService>>;
 
 /// The LLM's nutrition guess for a recipe. Recipe first, so an unknown id costs no request.
-pub(crate) async fn estimate_recipe(db: &Db, svc: &crate::ImportService, id: i64) -> Result<crate::NutritionEstimate> {
-    let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
+pub(crate) async fn estimate_recipe(db: &Db, sc: &Scope, svc: &crate::ImportService, id: i64) -> Result<crate::NutritionEstimate> {
+    let r = db.get_recipe(sc, id).await?.ok_or(Error::NotFound("recipe"))?;
     let llm = svc.llm().ok_or_else(|| Error::Validation("no LLM is configured (set LLM_PROVIDER)".into()))?;
     let lines: Vec<String> = r.content.ingredients.iter().map(|i| if i.original_text.is_empty() { ingredient_line(i, 1.0) } else { i.original_text.clone() }).filter(|l| !l.is_empty()).collect();
     llm.estimate_nutrition(&r.content.name, &lines).await
 }
 
 /// htmx target: the nutrition fieldset filled with a guess. Saves nothing.
-async fn nutrition_fragment(State(db): State<Db>, axum::Extension(svc): Svc, Path(id): Path<i64>) -> Result<axum::response::Html<String>> {
-    let e = estimate_recipe(&db, &svc, id).await?;
+async fn nutrition_fragment(sc: Scope, State(db): State<Db>, axum::Extension(svc): Svc, Path(id): Path<i64>) -> Result<axum::response::Html<String>> {
+    let e = estimate_recipe(&db, &sc, &svc, id).await?;
     let n = crate::Nutrition { calories: e.calories, protein_g: e.protein, fat_g: e.fat, carbs_g: e.carbs };
     Ok(axum::response::Html(NutritionFields::new(id, true, Some(&n)).html()?))
 }
 
-async fn edit_recipe_page(State(db): State<Db>, axum::Extension(svc): Svc, Path(id): Path<i64>) -> Result<RecipeForm> {
-    let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
+async fn edit_recipe_page(sc: Scope, State(db): State<Db>, axum::Extension(svc): Svc, Path(id): Path<i64>) -> Result<RecipeForm> {
+    let r = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?;
     let lines: Vec<String> = r
         .content
         .ingredients
@@ -529,18 +534,18 @@ struct ImportForm {
     url: String,
 }
 
-async fn import_form(State(s): State<AppState>, axum::Extension(svc): Svc, axum::Form(f): axum::Form<ImportForm>) -> Result<Redirect> {
-    let (r, suggested) = svc.import_suggested(&s.db, &s.images_dir, &f.url).await?;
+async fn import_form(sc: Scope, State(s): State<AppState>, axum::Extension(svc): Svc, axum::Form(f): axum::Form<ImportForm>) -> Result<Redirect> {
+    let (r, suggested) = svc.import_suggested(&s.db, &sc, &s.images_dir, &f.url).await?;
     Ok(Redirect::to(&review_url(r.id, &suggested)))
 }
 
-async fn create_recipe(State(db): State<Db>, axum::Extension(svc): Svc, axum::Form(f): axum::Form<RecipeFormData>) -> Result<Redirect> {
-    let (units, foods) = (db.units().await?, db.foods().await?);
+async fn create_recipe(sc: Scope, State(db): State<Db>, axum::Extension(svc): Svc, axum::Form(f): axum::Form<RecipeFormData>) -> Result<Redirect> {
+    let (units, foods) = (db.units(&sc).await?, db.foods(&sc).await?);
     let nutrition = f.nutrition()?.flatten();
     let mut ingredients: Vec<IngredientInput> = f.ingredients.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| parsed_input(l, &units, &foods)).collect();
     let all = vec![true; ingredients.len()];
     let suggested = svc.fill_lines(&mut ingredients, &all, &units, &foods).await;
-    let r = db.create_recipe(RecipeInput { name: f.name, description: f.description, nutrition, ingredients, ..Default::default() }).await?;
+    let r = db.create_recipe(&sc, RecipeInput { name: f.name, description: f.description, nutrition, ingredients, ..Default::default() }).await?;
     Ok(Redirect::to(&review_url(r.id, &suggested)))
 }
 
@@ -555,9 +560,9 @@ fn to_input(i: &crate::Ingredient) -> IngredientInput {
     }
 }
 
-async fn edit_recipe(State(db): State<Db>, axum::Extension(svc): Svc, Path(id): Path<i64>, axum::Form(f): axum::Form<RecipeFormData>) -> Result<Redirect> {
-    let old = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?.content;
-    let (units, foods) = (db.units().await?, db.foods().await?);
+async fn edit_recipe(sc: Scope, State(db): State<Db>, axum::Extension(svc): Svc, Path(id): Path<i64>, axum::Form(f): axum::Form<RecipeFormData>) -> Result<Redirect> {
+    let old = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?.content;
+    let (units, foods) = (db.units(&sc).await?, db.foods(&sc).await?);
     let nutrition = f.nutrition()?.unwrap_or(old.nutrition);
     // A line left as it was keeps what the user already reviewed (and is not sent to the LLM again); only new or changed text is parsed.
     let (mut ingredients, mut is_new) = (Vec::new(), Vec::new());
@@ -568,6 +573,7 @@ async fn edit_recipe(State(db): State<Db>, axum::Extension(svc): Svc, Path(id): 
     }
     let suggested = svc.fill_lines(&mut ingredients, &is_new, &units, &foods).await;
     db.update_recipe(
+        &sc,
         id,
         RecipeInput {
             name: f.name,
@@ -613,8 +619,8 @@ struct ReviewQuery {
     suggested: Option<String>,
 }
 
-async fn review_page(State(db): State<Db>, Path(id): Path<i64>, Query(q): Query<ReviewQuery>) -> Result<ReviewPage> {
-    let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
+async fn review_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Query(q): Query<ReviewQuery>) -> Result<ReviewPage> {
+    let r = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?;
     let suggested: Vec<usize> = q.suggested.unwrap_or_default().split(',').filter_map(|n| n.trim().parse().ok()).collect();
     let rows = r
         .content
@@ -636,7 +642,7 @@ async fn review_page(State(db): State<Db>, Path(id): Path<i64>, Query(q): Query<
             note: i.note.clone(),
         })
         .collect();
-    Ok(ReviewPage { id, name: r.content.name, rows, units: db.units().await?, foods: db.foods().await? })
+    Ok(ReviewPage { id, name: r.content.name, rows, units: db.units(&sc).await?, foods: db.foods(&sc).await? })
 }
 
 #[derive(Default)]
@@ -674,12 +680,12 @@ fn parse_review(body: &[u8]) -> Result<Vec<ReviewLine>> {
     Ok(rows)
 }
 
-async fn review_save(State(db): State<Db>, Path(id): Path<i64>, body: axum::body::Bytes) -> Result<Redirect> {
-    let old = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?.content;
+async fn review_save(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, body: axum::body::Bytes) -> Result<Redirect> {
+    let old = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?.content;
     let mut rows = parse_review(&body)?;
     // The same new name typed on several rows is created once; an existing name is reused.
-    let mut units = db.units().await?;
-    let mut foods = db.foods().await?;
+    let mut units = db.units(&sc).await?;
+    let mut foods = db.foods(&sc).await?;
     for row in &mut rows {
         if !row.new_unit.is_empty() {
             let wanted = row.new_unit.to_lowercase();
@@ -690,7 +696,7 @@ async fn review_save(State(db): State<Db>, Path(id): Path<i64>, body: axum::body
                     let dim: Dimension = serde_json::from_value(row.new_unit_dimension.clone().into())
                         .map_err(|_| Error::Validation(format!("'{}' is not a unit dimension", row.new_unit_dimension)))?;
                     let factor = row.new_unit_factor.filter(|_| matches!(dim, Dimension::Mass | Dimension::Volume));
-                    let new_id = db.add_unit(&row.new_unit, dim, factor).await?;
+                    let new_id = db.add_unit(&sc, &row.new_unit, dim, factor).await?;
                     units.push(crate::Unit { id: new_id, name: row.new_unit.clone(), aliases: vec![], dimension: dim, factor });
                     new_id
                 }
@@ -702,7 +708,7 @@ async fn review_save(State(db): State<Db>, Path(id): Path<i64>, body: axum::body
             row.input.food_id = Some(match known {
                 Some(f) => f.id,
                 None => {
-                    let new_id = db.add_food(&row.new_food).await?;
+                    let new_id = db.add_food(&sc, &row.new_food).await?;
                     foods.push(crate::Food { id: new_id, name: row.new_food.clone(), aliases: vec![] });
                     new_id
                 }
@@ -711,6 +717,7 @@ async fn review_save(State(db): State<Db>, Path(id): Path<i64>, body: axum::body
     }
     // ponytail: units/foods created above stay if update_recipe then rejects the rows; harmless extras, one tx if it matters.
     db.update_recipe(
+        &sc,
         id,
         RecipeInput {
             name: old.name,
@@ -776,11 +783,11 @@ struct WeekQuery {
     week: Option<String>,
 }
 
-async fn plan_page(State(db): State<Db>, Query(q): Query<WeekQuery>) -> Result<PlanPage> {
+async fn plan_page(sc: Scope, State(db): State<Db>, Query(q): Query<WeekQuery>) -> Result<PlanPage> {
     let week = db.monday(&q.week.unwrap_or_else(|| "now".into())).await?;
     let end = db.day(&week, 6).await?;
-    let recipes = db.list_recipes(true, None).await?;
-    let entries = db.meal_plan(&week, &end).await?;
+    let recipes = db.list_recipes(&sc, true, None).await?;
+    let entries = db.meal_plan(&sc, &week, &end).await?;
     let mut days = Vec::new();
     for n in 0..7 {
         let date = db.day(&week, n).await?;
@@ -817,13 +824,13 @@ struct PlanForm {
     scale: String,
 }
 
-async fn plan_add(State(db): State<Db>, axum::Form(f): axum::Form<PlanForm>) -> Result<Redirect> {
+async fn plan_add(sc: Scope, State(db): State<Db>, axum::Form(f): axum::Form<PlanForm>) -> Result<Redirect> {
     let recipe_id = id_of(f.recipe_id.as_deref().unwrap_or_default())?;
     let batch_id = match (recipe_id, number(&f.scale)?) {
-        (Some(r), Some(scale)) => Some(db.start_batch(r, scale).await?.batch.id),
+        (Some(r), Some(scale)) => Some(db.start_batch(&sc, r, scale).await?.batch.id),
         _ => None,
     };
-    db.add_entry(crate::EntryInput { date: f.date.clone(), slot: f.slot, recipe_id, title: f.title, batch_id, ..Default::default() }).await?;
+    db.add_entry(&sc, crate::EntryInput { date: f.date.clone(), slot: f.slot, recipe_id, title: f.title, batch_id, ..Default::default() }).await?;
     Ok(Redirect::to(&format!("/plan?week={}", db.monday(&f.date).await?)))
 }
 
@@ -832,8 +839,8 @@ struct WeekForm {
     week: String,
 }
 
-async fn plan_delete(State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<WeekForm>) -> Result<Redirect> {
-    db.delete_entry(id).await?;
+async fn plan_delete(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<WeekForm>) -> Result<Redirect> {
+    db.delete_entry(&sc, id).await?;
     Ok(Redirect::to(&format!("/plan?week={}", db.monday(&f.week).await?)))
 }
 
@@ -843,8 +850,8 @@ struct ListsPage {
     lists: Vec<crate::ShoppingListSummary>,
 }
 
-async fn lists_page(State(db): State<Db>) -> Result<ListsPage> {
-    Ok(ListsPage { lists: db.shopping_lists().await? })
+async fn lists_page(sc: Scope, State(db): State<Db>) -> Result<ListsPage> {
+    Ok(ListsPage { lists: db.shopping_lists(&sc).await? })
 }
 
 #[derive(Deserialize)]
@@ -852,8 +859,8 @@ struct NameForm {
     name: String,
 }
 
-async fn lists_create(State(db): State<Db>, axum::Form(f): axum::Form<NameForm>) -> Result<Redirect> {
-    Ok(Redirect::to(&format!("/lists/{}", db.create_list(&f.name).await?.id)))
+async fn lists_create(sc: Scope, State(db): State<Db>, axum::Form(f): axum::Form<NameForm>) -> Result<Redirect> {
+    Ok(Redirect::to(&format!("/lists/{}", db.create_list(&sc, &f.name).await?.id)))
 }
 
 struct ItemRow {
@@ -871,9 +878,9 @@ struct ListPage {
     units: Vec<crate::Unit>,
 }
 
-async fn list_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<ListPage> {
-    let list = db.shopping_list(id).await?;
-    let (units, foods) = (db.units().await?, db.foods().await?);
+async fn list_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<ListPage> {
+    let list = db.shopping_list(&sc, id).await?;
+    let (units, foods) = (db.units(&sc).await?, db.foods(&sc).await?);
     let items = list
         .items
         .iter()
@@ -898,9 +905,9 @@ struct ItemForm {
     item: String,
 }
 
-async fn list_add_item(State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<ItemForm>) -> Result<Redirect> {
+async fn list_add_item(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<ItemForm>) -> Result<Redirect> {
     let wanted = f.item.trim().to_lowercase();
-    let food = db.foods().await?.into_iter().find(|x| std::iter::once(&x.name).chain(&x.aliases).any(|n| n.to_lowercase() == wanted));
+    let food = db.foods(&sc).await?.into_iter().find(|x| std::iter::once(&x.name).chain(&x.aliases).any(|n| n.to_lowercase() == wanted));
     let input = crate::ItemInput {
         qty: number(&f.qty)?,
         unit_id: id_of(&f.unit_id)?,
@@ -908,7 +915,7 @@ async fn list_add_item(State(db): State<Db>, Path(id): Path<i64>, axum::Form(f):
         food_id: food.map(|x| x.id),
         ..Default::default()
     };
-    db.add_item(id, input).await?;
+    db.add_item(&sc, id, input).await?;
     Ok(Redirect::to(&format!("/lists/{id}")))
 }
 
@@ -925,23 +932,23 @@ struct AddToList {
     scale: String,
 }
 
-async fn target_list(db: &Db, f: &AddToList) -> Result<i64> {
+async fn target_list(db: &Db, sc: &Scope, f: &AddToList) -> Result<i64> {
     if !f.new_list.trim().is_empty() {
-        return Ok(db.create_list(&f.new_list).await?.id);
+        return Ok(db.create_list(sc, &f.new_list).await?.id);
     }
     id_of(&f.list_id)?.ok_or_else(|| Error::Validation("choose a list or name a new one".into()))
 }
 
-async fn list_add_recipe(State(db): State<Db>, axum::Form(f): axum::Form<AddToList>) -> Result<Redirect> {
-    let list = target_list(&db, &f).await?;
+async fn list_add_recipe(sc: Scope, State(db): State<Db>, axum::Form(f): axum::Form<AddToList>) -> Result<Redirect> {
+    let list = target_list(&db, &sc, &f).await?;
     let recipe = f.recipe_id.ok_or(Error::Validation("recipe_id is required".into()))?;
-    db.add_recipe_to_list(list, recipe, number(&f.scale)?.unwrap_or(1.0)).await?;
+    db.add_recipe_to_list(&sc, list, recipe, number(&f.scale)?.unwrap_or(1.0)).await?;
     Ok(Redirect::to(&format!("/lists/{list}")))
 }
 
-async fn list_add_batch(State(db): State<Db>, axum::Form(f): axum::Form<AddToList>) -> Result<Redirect> {
-    let list = target_list(&db, &f).await?;
-    db.add_batch_to_list(list, f.batch_id.ok_or(Error::Validation("batch_id is required".into()))?).await?;
+async fn list_add_batch(sc: Scope, State(db): State<Db>, axum::Form(f): axum::Form<AddToList>) -> Result<Redirect> {
+    let list = target_list(&db, &sc, &f).await?;
+    db.add_batch_to_list(&sc, list, f.batch_id.ok_or(Error::Validation("batch_id is required".into()))?).await?;
     Ok(Redirect::to(&format!("/lists/{list}")))
 }
 
@@ -953,30 +960,27 @@ struct CheckForm {
 
 /// htmx gets 204 (the box already shows the state); a plain form post gets a redirect.
 async fn item_check(
+    sc: Scope,
     State(db): State<Db>,
     Path(id): Path<i64>,
     headers: axum::http::HeaderMap,
     axum::Form(f): axum::Form<CheckForm>,
 ) -> Result<axum::response::Response> {
-    db.set_item_checked(id, f.checked.is_some()).await?;
+    db.set_item_checked(&sc, id, f.checked.is_some()).await?;
     if headers.contains_key("hx-request") {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
-    Ok(back_to_list(&db, id).await.into_response())
+    Ok(back_to_list(&db, &sc, id).await.into_response())
 }
 
-async fn item_delete(State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
-    let list = list_of(&db, id).await?;
-    db.delete_item(id).await?;
+async fn item_delete(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
+    let list = db.item_list_id(&sc, id).await?;
+    db.delete_item(&sc, id).await?;
     Ok(Redirect::to(&format!("/lists/{list}")))
 }
 
-async fn list_of(db: &Db, item: i64) -> Result<i64> {
-    sqlx::query_scalar("SELECT list_id FROM shopping_list_items WHERE id = ?").bind(item).fetch_optional(&db.pool).await?.ok_or(Error::NotFound("shopping list item"))
-}
-
-async fn back_to_list(db: &Db, item: i64) -> Redirect {
-    Redirect::to(&format!("/lists/{}", list_of(db, item).await.unwrap_or(0)))
+async fn back_to_list(db: &Db, sc: &Scope, item: i64) -> Redirect {
+    Redirect::to(&format!("/lists/{}", db.item_list_id(sc, item).await.unwrap_or(0)))
 }
 
 #[derive(Template, WebTemplate)]

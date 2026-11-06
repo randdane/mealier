@@ -19,6 +19,8 @@ const MEALIE_SCHEMA: &str = "3527efeeec34";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ImportReport {
+    pub groups: usize,
+    pub households: usize,
     pub units: usize,
     pub foods: usize,
     pub recipes: usize,
@@ -130,22 +132,40 @@ fn read_backup(zip: &Path) -> Result<(Backup, ZipArchive<File>)> {
     Ok((b, archive))
 }
 
-async fn require_empty(tx: &mut Tx<'_>) -> Result<()> {
-    for t in ["recipes", "units", "foods", "users", "tags", "categories", "cookbooks", "tools", "batches", "shopping_lists", "meal_plan_entries", "images"] {
+/// The database must hold nothing but, at most, the local admin and the empty "Home" tenant made for
+/// them. Returns Home's group id, if it is there: the import replaces it.
+async fn require_empty(tx: &mut Tx<'_>) -> Result<Option<i64>> {
+    let not_empty = |t: &str| Error::Validation(format!("the database is not empty ({t} has rows); import into a fresh one"));
+    for t in ["recipes", "units", "foods", "tags", "categories", "cookbooks", "tools", "batches", "shopping_lists", "meal_plan_entries", "images"] {
         let n: i64 = sqlx::query(&format!("SELECT count(*) FROM {t}")).fetch_one(&mut **tx).await?.get(0);
         if n > 0 {
-            return Err(Error::Validation(format!("the database is not empty ({t} has rows); import into a fresh one")));
+            return Err(not_empty(t));
         }
     }
-    Ok(())
+    let users: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE local_admin = 0").fetch_one(&mut **tx).await?;
+    if users > 0 {
+        return Err(not_empty("users"));
+    }
+    let groups: Vec<(i64, String)> = sqlx::query_as("SELECT id, slug FROM groups").fetch_all(&mut **tx).await?;
+    let households: Vec<(String, i64)> = sqlx::query_as("SELECT slug, group_id FROM households").fetch_all(&mut **tx).await?;
+    let only_home = matches!((groups.as_slice(), households.as_slice()), ([(g, gs)], [(hs, hg)]) if gs == "home" && hs == "home" && hg == g);
+    if !(groups.is_empty() && households.is_empty()) && !only_home {
+        return Err(not_empty("groups"));
+    }
+    Ok(sqlx::query_scalar("SELECT id FROM groups").fetch_optional(&mut **tx).await?)
 }
 
 pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Result<ImportReport> {
     let (b, mut archive) = read_backup(zip)?;
     let mut report = ImportReport::default();
     let mut tx = db.pool.begin().await?;
-    require_empty(&mut tx).await?;
+    let home = require_empty(&mut tx).await?;
+    if let Some(g) = home {
+        // Out of the way of an imported group called "home"; deleted below once the local admin has moved.
+        sqlx::query("UPDATE groups SET slug = '~home' WHERE id = ?").bind(g).execute(&mut *tx).await?;
+    }
 
+    import_tenants(&mut tx, &b, &mut report).await?;
     import_units_and_foods(&mut tx, &b, &mut report).await?;
     import_users(&mut tx, &b, &mut report).await?;
     import_recipes(&mut tx, &b, &mut report).await?;
@@ -153,6 +173,9 @@ pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Res
     import_meal_plans(&mut tx, &b, &mut report).await?;
     import_shopping(&mut tx, &b, &mut report).await?;
     let files = import_images(&mut tx, &b, &mut archive, &mut report).await?;
+    if let Some(g) = home {
+        retire_home(&mut tx, g).await?;
+    }
 
     // Files go down last. Content-addressed and harmless if the commit fails:
     // the GC step collects unreferenced ones.
@@ -164,13 +187,92 @@ pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Res
     Ok(report)
 }
 
+/// Mealie's `{first_day_of_week, private_*, ...}` row as the columns mealier reads plus the rest as JSON.
+fn extra(r: &MRow, used: &[&str]) -> Result<String> {
+    let rest: Map<String, Value> = r.iter().filter(|(k, _)| !["id", "group_id", "household_id", "created_at", "update_at"].contains(&k.as_str()) && !used.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+    Ok(serde_json::to_string(&rest)?)
+}
+
+/// Every group and household in the backup, with their preferences. The first household becomes the default one.
+async fn import_tenants(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
+    if b.rows("households").is_empty() {
+        return Err(Error::Validation("the backup contains no households".into()));
+    }
+    for g in b.rows("groups") {
+        let uuid = id(g, "id")?;
+        let name = id(g, "name")?;
+        let made = crate::tenancy::insert_group(tx, name, s(g, "slug").unwrap_or(name)).await?;
+        if let Some(p) = b.rows("group_preferences").into_iter().find(|p| s(p, "group_id") == Some(uuid)) {
+            sqlx::query("UPDATE group_preferences SET private_group = ?, extra = ? WHERE group_id = ?").bind(flag(p, "private_group")).bind(extra(p, &["private_group"])?).bind(made.id).execute(&mut **tx).await?;
+        }
+        remember(tx, "group", uuid, made.id).await?;
+        report.groups += 1;
+    }
+    let mut first = None;
+    for h in b.rows("households") {
+        let uuid = id(h, "id")?;
+        let name = id(h, "name")?;
+        let group = local(tx, "group", id(h, "group_id")?).await?;
+        let made = crate::tenancy::insert_household(tx, group, name, s(h, "slug").unwrap_or(name)).await?;
+        if let Some(p) = b.rows("household_preferences").into_iter().find(|p| s(p, "household_id") == Some(uuid)) {
+            sqlx::query("UPDATE household_preferences SET first_day_of_week = ?, private_household = ?, extra = ? WHERE household_id = ?")
+                .bind(p.get("first_day_of_week").and_then(Value::as_i64).unwrap_or(0))
+                .bind(flag(p, "private_household"))
+                .bind(extra(p, &["first_day_of_week", "private_household"])?)
+                .bind(made.id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        remember(tx, "household", uuid, made.id).await?;
+        first.get_or_insert(made.id);
+        report.households += 1;
+    }
+    crate::tenancy::set_default(tx, first.expect("households is not empty")).await?;
+    Ok(())
+}
+
+/// The empty "Home" made for the local admin gives way to the imported tenants: the admin moves
+/// into the default household, then Home is deleted.
+async fn retire_home(tx: &mut Tx<'_>, group: i64) -> Result<()> {
+    let default: String = sqlx::query_scalar("SELECT value FROM instance_settings WHERE key = 'default_household_id'").fetch_one(&mut **tx).await?;
+    let default: i64 = default.parse().map_err(|_| Error::Validation("bad default household".into()))?;
+    sqlx::query("UPDATE users SET household_id = ? WHERE household_id IN (SELECT id FROM households WHERE group_id = ?)").bind(default).bind(group).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM household_preferences WHERE household_id IN (SELECT id FROM households WHERE group_id = ?)").bind(group).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM households WHERE group_id = ?").bind(group).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM group_preferences WHERE group_id = ?").bind(group).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM groups WHERE id = ?").bind(group).execute(&mut **tx).await?;
+    Ok(())
+}
+
+/// A row of `table` must be in `group`: a backup that mixes tenants is refused, not repaired.
+async fn same_group(tx: &mut Tx<'_>, table: &str, row: i64, group: i64, what: &str) -> Result<()> {
+    let ok: Option<i64> = sqlx::query_scalar(&format!("SELECT 1 FROM {table} WHERE id = ? AND group_id = ?")).bind(row).bind(group).fetch_optional(&mut **tx).await?;
+    ok.map(|_| ()).ok_or_else(|| Error::Validation(format!("backup {what} belongs to another group")))
+}
+
+/// The household a Mealie record belongs to: its user's, when that user is in `group`; otherwise the group's first.
+async fn household_for(tx: &mut Tx<'_>, user_uuid: Option<&str>, group: i64) -> Result<i64> {
+    if let Some(u) = user_uuid
+        && let Some(uid) = sqlx::query_scalar::<_, i64>("SELECT local_id FROM import_ids WHERE kind = 'user' AND mealie_uuid = ?").bind(u).fetch_optional(&mut **tx).await?
+    {
+        let h: Option<i64> = sqlx::query_scalar("SELECT u.household_id FROM users u JOIN households h ON h.id = u.household_id WHERE u.id = ? AND h.group_id = ?").bind(uid).bind(group).fetch_optional(&mut **tx).await?;
+        if let Some(h) = h {
+            return Ok(h);
+        }
+    }
+    let first: Option<i64> = sqlx::query_scalar("SELECT min(id) FROM households WHERE group_id = ?").bind(group).fetch_one(&mut **tx).await?;
+    first.ok_or_else(|| Error::Validation("backup group has no household".into()))
+}
+
 async fn import_units_and_foods(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
     let unit_aliases = aliases(b, "ingredient_units_aliases", "unit_id");
     for u in b.rows("ingredient_units") {
         let (uuid, name) = (id(u, "id")?, id(u, "name")?);
+        let group = local(tx, "group", id(u, "group_id")?).await?;
         let (dim, factor) = classify(u);
         let al = serde_json::to_string(unit_aliases.get(uuid).unwrap_or(&vec![]))?;
-        let r = sqlx::query("INSERT OR IGNORE INTO units (name, aliases, dimension, factor) VALUES (?, ?, ?, ?)")
+        let r = sqlx::query("INSERT OR IGNORE INTO units (group_id, name, aliases, dimension, factor) VALUES (?, ?, ?, ?, ?)")
+            .bind(group)
             .bind(name)
             .bind(al)
             .bind(dim.as_str())
@@ -182,20 +284,21 @@ async fn import_units_and_foods(tx: &mut Tx<'_>, b: &Backup, report: &mut Import
         } else {
             report.units += 1;
         }
-        let lid = sqlx::query_scalar("SELECT id FROM units WHERE name = ?").bind(name).fetch_one(&mut **tx).await?;
+        let lid = sqlx::query_scalar("SELECT id FROM units WHERE group_id = ? AND name = ?").bind(group).bind(name).fetch_one(&mut **tx).await?;
         remember(tx, "unit", uuid, lid).await?;
     }
     let food_aliases = aliases(b, "ingredient_foods_aliases", "food_id");
     for fo in b.rows("ingredient_foods") {
         let (uuid, name) = (id(fo, "id")?, id(fo, "name")?);
+        let group = local(tx, "group", id(fo, "group_id")?).await?;
         let al = serde_json::to_string(food_aliases.get(uuid).unwrap_or(&vec![]))?;
-        let r = sqlx::query("INSERT OR IGNORE INTO foods (name, aliases) VALUES (?, ?)").bind(name).bind(al).execute(&mut **tx).await?;
+        let r = sqlx::query("INSERT OR IGNORE INTO foods (group_id, name, aliases) VALUES (?, ?, ?)").bind(group).bind(name).bind(al).execute(&mut **tx).await?;
         if r.rows_affected() == 0 {
             report.skipped.push(format!("food {name:?} appears twice; the second was merged into the first"));
         } else {
             report.foods += 1;
         }
-        let lid = sqlx::query_scalar("SELECT id FROM foods WHERE name = ?").bind(name).fetch_one(&mut **tx).await?;
+        let lid = sqlx::query_scalar("SELECT id FROM foods WHERE group_id = ? AND name = ?").bind(group).bind(name).fetch_one(&mut **tx).await?;
         remember(tx, "food", uuid, lid).await?;
     }
     let labels = b.rows("multi_purpose_labels").len();
@@ -210,7 +313,9 @@ async fn vocabulary(tx: &mut Tx<'_>, b: &Backup, src: &str, table: &str, kind: &
     let mut names = HashMap::new();
     for r in b.rows(src) {
         let (uuid, name) = (id(r, "id")?, id(r, "name")?);
-        let lid = sqlx::query(&format!("INSERT OR IGNORE INTO {table} (name) VALUES (?)")).bind(name).execute(&mut **tx).await?.last_insert_rowid();
+        let group = local(tx, "group", id(r, "group_id")?).await?;
+        sqlx::query(&format!("INSERT OR IGNORE INTO {table} (group_id, name) VALUES (?, ?)")).bind(group).bind(name).execute(&mut **tx).await?;
+        let lid = sqlx::query_scalar(&format!("SELECT id FROM {table} WHERE group_id = ? AND name = ?")).bind(group).bind(name).fetch_one(&mut **tx).await?;
         remember(tx, kind, uuid, lid).await?;
         names.insert(uuid.to_string(), name.to_string());
     }
@@ -291,7 +396,8 @@ async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) 
             ingredients,
             steps: positioned(b, "recipe_instructions", uuid).into_iter().filter_map(|i| s(i, "text").map(str::to_string)).collect(),
         };
-        let recipe = insert_recipe(tx, input).await?;
+        let group = local(tx, "group", id(r, "group_id")?).await?;
+        let recipe = insert_recipe(tx, group, input).await?;
         remember(tx, "recipe", uuid, recipe.id).await?;
         report.recipes += 1;
     }
@@ -308,12 +414,17 @@ async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) 
 async fn import_users(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
     for u in b.rows("users") {
         let uuid = id(u, "id")?;
-        let lid = sqlx::query("INSERT INTO users (username, email, full_name, role, disabled) VALUES (?, ?, ?, ?, ?)")
+        let (household, group) = (local(tx, "household", id(u, "household_id")?).await?, local(tx, "group", id(u, "group_id")?).await?);
+        same_group(tx, "households", household, group, "user's household").await?;
+        // The local admin was here first. A backup user called "admin" is the one the owner knows; the local admin steps aside.
+        sqlx::query("UPDATE users SET username = 'local-admin' WHERE local_admin = 1 AND username = ?").bind(id(u, "username")?).execute(&mut **tx).await?;
+        let lid = sqlx::query("INSERT INTO users (username, email, full_name, role, disabled, household_id) VALUES (?, ?, ?, ?, ?, ?)")
             .bind(id(u, "username")?)
             .bind(id(u, "email")?)
             .bind(s(u, "full_name").unwrap_or(""))
             .bind(if flag(u, "admin") { "admin" } else { "user" })
             .bind(s(u, "locked_at").is_some())
+            .bind(household)
             .execute(&mut **tx)
             .await?
             .last_insert_rowid();
@@ -339,8 +450,12 @@ async fn import_history(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) 
         match s(e, "event_type") {
             Some("system") => system += 1,
             Some("comment") if lower.contains("made this") || lower.contains("made it") => {
-                sqlx::query("INSERT INTO batches (status, recipe_id, source, made_on, notes) VALUES ('done', ?, 'imported', ?, ?)")
-                    .bind(local(tx, "recipe", recipe).await?)
+                let recipe_id = local(tx, "recipe", recipe).await?;
+                let group: i64 = sqlx::query_scalar("SELECT group_id FROM recipes WHERE id = ?").bind(recipe_id).fetch_one(&mut **tx).await?;
+                let household = household_for(tx, s(e, "user_id"), group).await?;
+                sqlx::query("INSERT INTO batches (household_id, status, recipe_id, source, made_on, notes) VALUES (?, 'done', ?, 'imported', ?, ?)")
+                    .bind(household)
+                    .bind(recipe_id)
                     .bind(date(ts))
                     .bind(s(e, "message").unwrap_or(""))
                     .execute(&mut **tx)
@@ -380,10 +495,17 @@ async fn import_history(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) 
 
 async fn import_meal_plans(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
     for m in b.rows("group_meal_plans") {
-        sqlx::query("INSERT INTO meal_plan_entries (date, slot, recipe_id, title, text) VALUES (?, ?, ?, ?, ?)")
+        let group = local(tx, "group", id(m, "group_id")?).await?;
+        let household = household_for(tx, s(m, "user_id"), group).await?;
+        let recipe = local_opt(tx, "recipe", s(m, "recipe_id")).await?;
+        if let Some(r) = recipe {
+            same_group(tx, "recipes", r, group, "meal plan entry's recipe").await?;
+        }
+        sqlx::query("INSERT INTO meal_plan_entries (household_id, date, slot, recipe_id, title, text) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(household)
             .bind(id(m, "date")?)
             .bind(s(m, "entry_type").unwrap_or("dinner"))
-            .bind(local_opt(tx, "recipe", s(m, "recipe_id")).await?)
+            .bind(recipe)
             .bind(s(m, "title").unwrap_or(""))
             .bind(s(m, "text").unwrap_or(""))
             .execute(&mut **tx)
@@ -394,10 +516,14 @@ async fn import_meal_plans(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportRepor
 }
 
 async fn import_shopping(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
+    let mut list_group: HashMap<&str, i64> = HashMap::new();
     for l in b.rows("shopping_lists") {
         let uuid = id(l, "id")?;
-        let lid = sqlx::query("INSERT INTO shopping_lists (name) VALUES (?)").bind(s(l, "name").unwrap_or("")).execute(&mut **tx).await?.last_insert_rowid();
+        let group = local(tx, "group", id(l, "group_id")?).await?;
+        let household = household_for(tx, s(l, "user_id"), group).await?;
+        let lid = sqlx::query("INSERT INTO shopping_lists (household_id, name) VALUES (?, ?)").bind(household).bind(s(l, "name").unwrap_or("")).execute(&mut **tx).await?.last_insert_rowid();
         remember(tx, "shopping_list", uuid, lid).await?;
+        list_group.insert(uuid, group);
         report.shopping_lists += 1;
     }
     let item_recipes: HashMap<&str, &str> = b
@@ -407,14 +533,23 @@ async fn import_shopping(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport)
         .collect();
     for i in b.rows("shopping_list_items") {
         let q = f(i, "quantity").filter(|q| *q > 0.0);
+        let list_uuid = id(i, "shopping_list_id")?;
+        let group = *list_group.get(list_uuid).ok_or_else(|| Error::Validation("backup refers to a shopping_list it does not contain".into()))?;
+        let (unit, food) = (local_opt(tx, "unit", s(i, "unit_id")).await?, local_opt(tx, "food", s(i, "food_id")).await?);
+        let recipe = local_opt(tx, "recipe", item_recipes.get(id(i, "id")?).copied()).await?;
+        for (table, what, found) in [("units", "unit", unit), ("foods", "food", food), ("recipes", "recipe", recipe)] {
+            if let Some(x) = found {
+                same_group(tx, table, x, group, &format!("shopping list item's {what}")).await?;
+            }
+        }
         sqlx::query("INSERT INTO shopping_list_items (list_id, qty, unit_id, food_id, note, checked, recipe_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
-            .bind(local(tx, "shopping_list", id(i, "shopping_list_id")?).await?)
+            .bind(local(tx, "shopping_list", list_uuid).await?)
             .bind(q)
-            .bind(local_opt(tx, "unit", s(i, "unit_id")).await?)
-            .bind(local_opt(tx, "food", s(i, "food_id")).await?)
+            .bind(unit)
+            .bind(food)
             .bind(s(i, "note").unwrap_or(""))
             .bind(flag(i, "checked"))
-            .bind(local_opt(tx, "recipe", item_recipes.get(id(i, "id")?).copied()).await?)
+            .bind(recipe)
             .execute(&mut **tx)
             .await?;
         report.shopping_list_items += 1;

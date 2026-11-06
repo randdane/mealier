@@ -3,7 +3,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 use sqlx::Row;
 
-use crate::{Db, Dimension, Error, Result};
+use crate::{Db, Dimension, Error, Result, Scope};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Unit {
@@ -32,6 +32,8 @@ pub struct User {
     pub oidc_subject: Option<String>,
     pub disabled: bool,
     pub cook_theme: String,
+    pub household_id: i64,
+    pub group_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
@@ -114,7 +116,7 @@ impl Image {
 pub const COOK_THEMES: [&str; 3] = ["normal", "high-contrast", "max-white"];
 
 /// Column list `user_row` reads, in order. Table-qualified callers alias the table `users`.
-pub(crate) const USER_COLS: &str = "users.id, users.username, users.email, users.full_name, users.role, users.oidc_issuer, users.oidc_subject, users.disabled, users.cook_theme";
+pub(crate) const USER_COLS: &str = "users.id, users.username, users.email, users.full_name, users.role, users.oidc_issuer, users.oidc_subject, users.disabled, users.cook_theme, users.household_id, (SELECT group_id FROM households WHERE households.id = users.household_id)";
 
 pub(crate) fn user_row(r: &sqlx::sqlite::SqliteRow) -> User {
     User {
@@ -127,6 +129,8 @@ pub(crate) fn user_row(r: &sqlx::sqlite::SqliteRow) -> User {
         oidc_subject: r.get(6),
         disabled: r.get(7),
         cook_theme: r.get(8),
+        household_id: r.get(9),
+        group_id: r.get(10),
     }
 }
 
@@ -135,8 +139,8 @@ fn names(json: &str) -> Vec<String> {
 }
 
 impl Db {
-    pub async fn units(&self) -> Result<Vec<Unit>> {
-        let rows = sqlx::query("SELECT id, name, aliases, dimension, factor FROM units ORDER BY id").fetch_all(&self.pool).await?;
+    pub async fn units(&self, sc: &Scope) -> Result<Vec<Unit>> {
+        let rows = sqlx::query("SELECT id, name, aliases, dimension, factor FROM units WHERE group_id = ? ORDER BY id").bind(sc.group_id).fetch_all(&self.pool).await?;
         rows.iter()
             .map(|r| {
                 Ok(Unit {
@@ -150,8 +154,8 @@ impl Db {
             .collect()
     }
 
-    pub async fn foods(&self) -> Result<Vec<Food>> {
-        let rows = sqlx::query("SELECT id, name, aliases FROM foods ORDER BY id").fetch_all(&self.pool).await?;
+    pub async fn foods(&self, sc: &Scope) -> Result<Vec<Food>> {
+        let rows = sqlx::query("SELECT id, name, aliases FROM foods WHERE group_id = ? ORDER BY id").bind(sc.group_id).fetch_all(&self.pool).await?;
         Ok(rows.iter().map(|r| Food { id: r.get(0), name: r.get(1), aliases: names(r.get(2)) }).collect())
     }
 
@@ -172,12 +176,14 @@ impl Db {
     }
 
     /// Newest first; undated (planned) batches lead.
-    pub async fn list_batches(&self, recipe_id: i64) -> Result<Vec<Batch>> {
+    pub async fn list_batches(&self, sc: &Scope, recipe_id: i64) -> Result<Vec<Batch>> {
+        self.check_recipe(sc, recipe_id).await?;
         let rows = sqlx::query(
             "SELECT id, status, recipe_id, snapshot_id, source, made_on, scale, rating, notes FROM batches
-             WHERE recipe_id = ? ORDER BY made_on IS NULL DESC, made_on DESC, id DESC",
+             WHERE recipe_id = ? AND household_id = ? ORDER BY made_on IS NULL DESC, made_on DESC, id DESC",
         )
         .bind(recipe_id)
+        .bind(sc.household_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -196,7 +202,8 @@ impl Db {
             .collect())
     }
 
-    pub async fn comments(&self, recipe_id: i64) -> Result<Vec<Comment>> {
+    pub async fn comments(&self, sc: &Scope, recipe_id: i64) -> Result<Vec<Comment>> {
+        self.check_recipe(sc, recipe_id).await?;
         let rows = sqlx::query("SELECT user_id, text, created_at FROM recipe_comments WHERE recipe_id = ? ORDER BY id")
             .bind(recipe_id)
             .fetch_all(&self.pool)
@@ -205,13 +212,14 @@ impl Db {
     }
 
     /// Entries with `from <= date <= to` (YYYY-MM-DD), by date then slot (`SLOTS` order; unknown imported slots last).
-    pub async fn meal_plan(&self, from: &str, to: &str) -> Result<Vec<MealPlanEntry>> {
+    pub async fn meal_plan(&self, sc: &Scope, from: &str, to: &str) -> Result<Vec<MealPlanEntry>> {
         let rows = sqlx::query(
             "SELECT id, date, slot, recipe_id, title, text, batch_id FROM meal_plan_entries
-             WHERE date BETWEEN ? AND ?
+             WHERE household_id = ? AND date BETWEEN ? AND ?
              ORDER BY date, CASE slot WHEN 'breakfast' THEN 0 WHEN 'lunch' THEN 1 WHEN 'dinner' THEN 2 WHEN 'side' THEN 3
                                       WHEN 'snack' THEN 4 WHEN 'dessert' THEN 5 WHEN 'drink' THEN 6 ELSE 7 END, id",
         )
+        .bind(sc.household_id)
         .bind(from)
         .bind(to)
         .fetch_all(&self.pool)
@@ -230,14 +238,15 @@ impl Db {
             .collect())
     }
 
-    pub async fn shopping_lists(&self) -> Result<Vec<ShoppingListSummary>> {
-        let rows = sqlx::query("SELECT id, name FROM shopping_lists ORDER BY id").fetch_all(&self.pool).await?;
+    pub async fn shopping_lists(&self, sc: &Scope) -> Result<Vec<ShoppingListSummary>> {
+        let rows = sqlx::query("SELECT id, name FROM shopping_lists WHERE household_id = ? ORDER BY id").bind(sc.household_id).fetch_all(&self.pool).await?;
         Ok(rows.iter().map(|r| ShoppingListSummary { id: r.get(0), name: r.get(1) }).collect())
     }
 
-    pub async fn shopping_list(&self, id: i64) -> Result<ShoppingList> {
-        let name: String = sqlx::query_scalar("SELECT name FROM shopping_lists WHERE id = ?")
+    pub async fn shopping_list(&self, sc: &Scope, id: i64) -> Result<ShoppingList> {
+        let name: String = sqlx::query_scalar("SELECT name FROM shopping_lists WHERE id = ? AND household_id = ?")
             .bind(id)
+            .bind(sc.household_id)
             .fetch_optional(&self.pool)
             .await?
             .ok_or(Error::NotFound("shopping list"))?;
@@ -261,7 +270,22 @@ impl Db {
         Ok(ShoppingList { id, name, items })
     }
 
-    pub async fn recipe_images(&self, recipe_id: i64) -> Result<Vec<Image>> {
+    /// Is the image named by `hash` used by a recipe in the caller's group or a batch of their household?
+    pub(crate) async fn image_visible(&self, sc: &Scope, hash: &str) -> Result<bool> {
+        let found = sqlx::query(
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM recipe_images ri JOIN recipes r ON r.id = ri.recipe_id WHERE ri.hash = ?1 AND r.group_id = ?2)
+                 OR EXISTS (SELECT 1 FROM batch_photos bp JOIN batches b ON b.id = bp.batch_id WHERE bp.hash = ?1 AND b.household_id = ?3)",
+        )
+        .bind(hash)
+        .bind(sc.group_id)
+        .bind(sc.household_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(found.is_some())
+    }
+
+    pub async fn recipe_images(&self, sc: &Scope, recipe_id: i64) -> Result<Vec<Image>> {
+        self.check_recipe(sc, recipe_id).await?;
         let rows = sqlx::query("SELECT i.hash, i.mime FROM recipe_images r JOIN images i ON i.hash = r.hash WHERE r.recipe_id = ? ORDER BY r.position, i.hash")
             .bind(recipe_id)
             .fetch_all(&self.pool)

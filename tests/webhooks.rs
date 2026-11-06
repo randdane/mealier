@@ -144,10 +144,10 @@ async fn hook(db: &Db, url: &str, kind: &str, events: &[&str], enabled: bool) {
 
 /// A recipe named "Soup" with a done batch rated 4; returns the batch id.
 async fn finished_batch(db: &Db) -> (i64, i64) {
-    let r = db.create_recipe(RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
-    let b = db.start_batch(r.id, 1.0).await.unwrap();
-    db.update_batch(b.batch.id, mealier::BatchInput { made_on: Some("2026-11-01".into()), scale: 1.0, rating: Some(4), ..Default::default() }).await.unwrap();
-    db.finish_batch(b.batch.id).await.unwrap();
+    let r = db.create_recipe(&common::scope(db).await, RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
+    let b = db.start_batch(&common::scope(db).await, r.id, 1.0).await.unwrap();
+    db.update_batch(&common::scope(db).await, b.batch.id, mealier::BatchInput { made_on: Some("2026-11-01".into()), scale: 1.0, rating: Some(4), ..Default::default() }).await.unwrap();
+    db.finish_batch(&common::scope(db).await, b.batch.id).await.unwrap();
     (b.batch.id, r.id)
 }
 
@@ -177,7 +177,7 @@ async fn json_webhook_gets_import_failed_when_an_import_fails() {
     let db = Db::open_memory().await.unwrap().with_notifier(notifier(None));
     hook(&db, &format!("{url}/in"), "json", &["import_failed"], true).await;
 
-    let err = ImportService::default().import(&db, &tempfile::tempdir().unwrap().keep(), "http://127.0.0.1:1/r").await.unwrap_err();
+    let err = ImportService::default().import(&db, &common::scope(&db).await, &tempfile::tempdir().unwrap().keep(), "http://127.0.0.1:1/r").await.unwrap_err();
 
     let got = hits(&h, 1).await;
     assert_eq!(got.len(), 1);
@@ -192,7 +192,7 @@ async fn ntfy_webhook_gets_title_tags_click_and_text_body() {
     let db = Db::open_memory().await.unwrap().with_notifier(notifier(Some("https://meals.test")));
     hook(&db, &format!("{url}/mealier"), "ntfy", &["batch_logged", "import_failed"], true).await;
     let (bid, _) = finished_batch(&db).await;
-    let _ = ImportService::default().import(&db, &tempfile::tempdir().unwrap().keep(), "http://127.0.0.1:1/r").await;
+    let _ = ImportService::default().import(&db, &common::scope(&db).await, &tempfile::tempdir().unwrap().keep(), "http://127.0.0.1:1/r").await;
 
     let got = hits(&h, 2).await;
     assert_eq!(got.len(), 2);
@@ -210,9 +210,9 @@ async fn ntfy_without_base_url_omits_click_and_unrated_says_logged() {
     let (url, h) = receiver(200, Duration::ZERO).await;
     let db = Db::open_memory().await.unwrap().with_notifier(notifier(None));
     hook(&db, &format!("{url}/m"), "ntfy", &["batch_logged"], true).await;
-    let r = db.create_recipe(RecipeInput { name: "Stew".into(), ..Default::default() }).await.unwrap();
-    let b = db.start_batch(r.id, 1.0).await.unwrap();
-    db.finish_batch(b.batch.id).await.unwrap();
+    let r = db.create_recipe(&common::scope(&db).await, RecipeInput { name: "Stew".into(), ..Default::default() }).await.unwrap();
+    let b = db.start_batch(&common::scope(&db).await, r.id, 1.0).await.unwrap();
+    db.finish_batch(&common::scope(&db).await, b.batch.id).await.unwrap();
 
     let got = hits(&h, 1).await;
     assert_eq!(got.len(), 1);
@@ -242,7 +242,7 @@ async fn a_failing_or_hanging_receiver_never_fails_or_delays_the_request() {
 
         let t = Instant::now();
         finished_batch(&db).await; // unwraps: finish_batch must succeed
-        let r = ImportService::default().import(&db, &tempfile::tempdir().unwrap().keep(), "http://127.0.0.1:1/r").await;
+        let r = ImportService::default().import(&db, &common::scope(&db).await, &tempfile::tempdir().unwrap().keep(), "http://127.0.0.1:1/r").await;
         assert!(r.is_err(), "the import's own error comes through");
         assert!(t.elapsed() < Duration::from_secs(1), "took {:?} with status {status} delay {delay:?}", t.elapsed());
         assert_eq!(hits(&h, 2).await.len(), 2, "both deliveries were attempted");
@@ -267,9 +267,9 @@ async fn ntfy_title_keeps_utf8_and_turns_control_characters_into_spaces() {
     let (url, h) = receiver(200, Duration::ZERO).await;
     let db = Db::open_memory().await.unwrap().with_notifier(notifier(None));
     hook(&db, &format!("{url}/m"), "ntfy", &["batch_logged"], true).await;
-    let r = db.create_recipe(RecipeInput { name: "Crème\nbrûlée".into(), ..Default::default() }).await.unwrap();
-    let b = db.start_batch(r.id, 1.0).await.unwrap();
-    db.finish_batch(b.batch.id).await.unwrap();
+    let r = db.create_recipe(&common::scope(&db).await, RecipeInput { name: "Crème\nbrûlée".into(), ..Default::default() }).await.unwrap();
+    let b = db.start_batch(&common::scope(&db).await, r.id, 1.0).await.unwrap();
+    db.finish_batch(&common::scope(&db).await, b.batch.id).await.unwrap();
 
     let got = hits(&h, 1).await;
     assert_eq!(got.len(), 1, "a recipe name must not break delivery");

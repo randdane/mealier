@@ -115,14 +115,17 @@ impl Db {
     /// The break-glass admin, created on first use. Never bound to OIDC (a trigger enforces it).
     pub async fn local_admin(&self) -> Result<User> {
         let sql = format!("SELECT {USER_COLS} FROM users WHERE local_admin = 1");
-        if let Some(r) = sqlx::query(&sql).fetch_optional(&self.pool).await? {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(r) = sqlx::query(&sql).fetch_optional(&mut *tx).await? {
             return Ok(user_row(&r));
         }
         // 'admin' may belong to a user imported from Mealie; never take that account over.
-        let taken: Option<i64> = sqlx::query_scalar("SELECT 1 FROM users WHERE username = 'admin'").fetch_optional(&self.pool).await?;
+        let taken: Option<i64> = sqlx::query_scalar("SELECT 1 FROM users WHERE username = 'admin'").fetch_optional(&mut *tx).await?;
         let name = if taken.is_some() { "local-admin" } else { "admin" };
-        sqlx::query("INSERT INTO users (username, email, role, local_admin) VALUES (?, 'local-admin@mealier.invalid', 'admin', 1)").bind(name).execute(&self.pool).await?;
-        let r = sqlx::query(&sql).fetch_one(&self.pool).await?;
+        let home = crate::tenancy::default_household_in(&mut tx).await?;
+        sqlx::query("INSERT INTO users (username, email, role, local_admin, household_id) VALUES (?, 'local-admin@mealier.invalid', 'admin', 1, ?)").bind(name).bind(home.id).execute(&mut *tx).await?;
+        let r = sqlx::query(&sql).fetch_one(&mut *tx).await?;
+        tx.commit().await?;
         Ok(user_row(&r))
     }
 
@@ -184,13 +187,15 @@ impl Db {
                 match same.as_slice() {
                     [] => {
                         let name = free_username(&mut tx, &id.username).await?;
-                        sqlx::query_scalar("INSERT INTO users (username, email, full_name, role, oidc_issuer, oidc_subject) VALUES (?, ?, ?, ?, ?, ?) RETURNING id")
+                        let home = crate::tenancy::default_household_in(&mut tx).await?;
+                        sqlx::query_scalar("INSERT INTO users (username, email, full_name, role, oidc_issuer, oidc_subject, household_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id")
                             .bind(name)
                             .bind(&id.email)
                             .bind(&id.name)
                             .bind(role)
                             .bind(&id.issuer)
                             .bind(&id.subject)
+                            .bind(home.id)
                             .fetch_one(&mut *tx)
                             .await?
                     }

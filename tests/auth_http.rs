@@ -1,4 +1,5 @@
 //! S26: the auth middleware, through the router.
+mod common;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -17,10 +18,11 @@ struct Ctx {
 }
 
 async fn add_user(db: &Db, name: &str, role: &str) -> i64 {
-    sqlx::query_scalar("INSERT INTO users (username, email, role) VALUES (?, ?, ?) RETURNING id")
+    sqlx::query_scalar("INSERT INTO users (username, email, role, household_id) VALUES (?, ?, ?, ?) RETURNING id")
         .bind(name)
         .bind(format!("{name}@x"))
         .bind(role)
+        .bind(common::household(db).await)
         .fetch_one(db.pool())
         .await
         .unwrap()
@@ -291,7 +293,7 @@ async fn logout_from_another_origin_does_not_log_you_out() {
 #[tokio::test]
 async fn the_cook_page_uses_the_signed_in_users_theme_and_the_form_saves_it_to_the_user() {
     let c = ctx().await;
-    let r = c.db.create_recipe(mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
+    let r = c.db.create_recipe(&common::scope(&c.db).await, mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
     let ck = cookie(&c.db.create_session(c.alice).await.unwrap());
     let other = cookie(&c.db.create_session(c.root).await.unwrap());
 
