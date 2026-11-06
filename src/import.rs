@@ -6,10 +6,10 @@ use std::io::Read;
 use std::path::Path;
 
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};
 use zip::ZipArchive;
 
+use crate::images::Processed;
 use crate::units::KNOWN_UNITS;
 use crate::recipes::{IngredientInput, Nutrition, RecipeInput, insert_recipe};
 use crate::{Db, Dimension, Error, Result};
@@ -158,6 +158,7 @@ async fn require_empty(tx: &mut Tx<'_>) -> Result<Option<i64>> {
 pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Result<ImportReport> {
     let (b, mut archive) = read_backup(zip)?;
     let mut report = ImportReport::default();
+    let images = prepare_images(&b, &mut archive, &mut report).await?;
     let mut tx = db.pool.begin().await?;
     let home = require_empty(&mut tx).await?;
     if let Some(g) = home {
@@ -168,20 +169,19 @@ pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Res
     import_tenants(&mut tx, &b, &mut report).await?;
     import_units_and_foods(&mut tx, &b, &mut report).await?;
     import_users(&mut tx, &b, &mut report).await?;
-    import_recipes(&mut tx, &b, &mut report).await?;
+    import_recipes(&mut tx, &b, &images, &mut report).await?;
     import_history(&mut tx, &b, &mut report).await?;
     import_meal_plans(&mut tx, &b, &mut report).await?;
     import_shopping(&mut tx, &b, &mut report).await?;
-    let files = import_images(&mut tx, &b, &mut archive, &mut report).await?;
+    let files = import_images(&mut tx, &images, &mut report).await?;
     if let Some(g) = home {
         retire_home(&mut tx, g).await?;
     }
 
     // Files go down last. Content-addressed and harmless if the commit fails:
     // the GC step collects unreferenced ones.
-    std::fs::create_dir_all(images_dir)?;
-    for (name, bytes) in files {
-        std::fs::write(images_dir.join(name), bytes)?;
+    for photo in files {
+        photo.write(images_dir)?;
     }
     tx.commit().await?;
     Ok(report)
@@ -342,7 +342,7 @@ fn linked(b: &Backup, table: &str, key: &str, recipe: &str, names: &HashMap<Stri
         .collect()
 }
 
-async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
+async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, images: &HashMap<String, Processed>, report: &mut ImportReport) -> Result<()> {
     let tags = vocabulary(tx, b, "tags", "tags", "tag").await?;
     let categories = vocabulary(tx, b, "categories", "categories", "category").await?;
     let cookbooks = vocabulary(tx, b, "cookbooks", "cookbooks", "cookbook").await?;
@@ -397,7 +397,7 @@ async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) 
             steps: positioned(b, "recipe_instructions", uuid).into_iter().filter_map(|i| s(i, "text").map(str::to_string)).collect(),
         };
         let group = local(tx, "group", id(r, "group_id")?).await?;
-        let recipe = insert_recipe(tx, group, input).await?;
+        let recipe = insert_recipe(tx, group, input, images.get(uuid).map(|p| p.hash.clone()).into_iter().collect()).await?;
         remember(tx, "recipe", uuid, recipe.id).await?;
         report.recipes += 1;
     }
@@ -560,24 +560,16 @@ async fn import_shopping(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport)
     Ok(())
 }
 
-/// Images are stored as `<images_dir>/<image_hash>.<ext>`.
-pub(crate) fn image_hash(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn dashed(uuid: &str) -> String {
     format!("{}-{}-{}-{}-{}", &uuid[..8], &uuid[8..12], &uuid[12..16], &uuid[16..20], &uuid[20..])
 }
 
-/// Each recipe's `original.<ext>`; Mealie's thumbnails are regenerated later.
-/// Returns (file name, bytes) to write once everything else has gone in.
-async fn import_images(
-    tx: &mut Tx<'_>,
-    b: &Backup,
-    archive: &mut ZipArchive<File>,
-    report: &mut ImportReport,
-) -> Result<Vec<(String, Vec<u8>)>> {
-    let mut files: HashMap<String, Vec<u8>> = HashMap::new();
+/// Each recipe's `original.<ext>`, put through the image module like any upload (so resized);
+/// Mealie's thumbnails are regenerated later. Keyed by the recipe's Mealie id. A file that is not
+/// a usable png, jpeg or webp is reported, not fatal. Done before the transaction, so decoding
+/// does not hold it open, and so the recipes' snapshots can list the hashes.
+async fn prepare_images(b: &Backup, archive: &mut ZipArchive<File>, report: &mut ImportReport) -> Result<HashMap<String, Processed>> {
+    let mut out = HashMap::new();
     for r in b.rows("recipes") {
         let uuid = id(r, "id")?;
         if uuid.len() != 32 {
@@ -585,29 +577,30 @@ async fn import_images(
         }
         let prefix = format!("data/recipes/{}/images/original.", dashed(uuid));
         let Some(name) = archive.file_names().filter_map(|n| n.ok()).find(|n| n.starts_with(&prefix)).map(|n| n.to_string()) else { continue };
-        let ext = name[prefix.len()..].to_lowercase();
-        let mime = match ext.as_str() {
-            "webp" => "image/webp",
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            _ => {
-                report.skipped.push(format!("image {name}: unknown type"));
-                continue;
-            }
-        };
         let mut bytes = Vec::new();
         archive.by_name(&name).map_err(archive_err)?.read_to_end(&mut bytes).map_err(archive_err)?;
-        let hash = image_hash(&bytes);
-        if files.insert(format!("{hash}.{ext}"), bytes).is_none() {
-            sqlx::query("INSERT INTO images (hash, mime) VALUES (?, ?)").bind(&hash).bind(mime).execute(&mut **tx).await?;
-            report.images += 1;
+        match crate::images::prepare(&bytes).await {
+            Ok(p) => {
+                out.insert(uuid.to_string(), p);
+            }
+            Err(e) => report.skipped.push(format!("image {name}: {e}")),
         }
+    }
+    Ok(out)
+}
+
+/// Records and links the prepared images. Returns each distinct one, to write once everything else has gone in.
+async fn import_images(tx: &mut Tx<'_>, images: &HashMap<String, Processed>, report: &mut ImportReport) -> Result<Vec<Processed>> {
+    let mut files: HashMap<&str, &Processed> = HashMap::new();
+    for (uuid, photo) in images {
+        photo.record(tx).await?;
         sqlx::query("INSERT INTO recipe_images (recipe_id, hash) VALUES (?, ?)")
             .bind(local(tx, "recipe", uuid).await?)
-            .bind(&hash)
+            .bind(&photo.hash)
             .execute(&mut **tx)
             .await?;
+        files.insert(&photo.hash, photo);
     }
-    Ok(files.into_iter().collect())
+    report.images += files.len();
+    Ok(files.into_values().cloned().collect())
 }

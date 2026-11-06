@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Backup - mealier{% endblock %}
+{% block content %}
+<h1>Backup</h1>
+{% if restarting %}
+<p>The backup is restored and mealier is restarting. Reload in a few seconds.{% if !previous.is_empty() %} The data it replaced is kept in <code>{{ previous }}</code> in the data directory.{% endif %}</p>
+{% else %}
+<h2>Export</h2>
+<p><a href="/api/export">Download an export</a>: a zip of the database and every image.</p>
+
+<h2>Restore</h2>
+<p>Replaces everything with the contents of an export. The current data is moved aside, not deleted, and mealier restarts afterwards.</p>
+<form method="post" action="/settings/backup/restore" enctype="multipart/form-data" class="stack">
+  <label>Export file <input type="file" name="file" accept=".zip" required></label>
+  <button type="submit">Restore</button>
+</form>
+{% endif %}
+{% endblock %}

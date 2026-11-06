@@ -28,6 +28,12 @@ CI publishes `ghcr.io/<owner>/mealier:latest` and `:<sha>` from `main`.
 | `mealier hash-password` | read a password on stdin, print an argon2id hash for `MEALIER_ADMIN_PASSWORD_FILE` |
 | `mealier healthcheck` | GET `127.0.0.1:$PORT/healthz`, exit 0 on 200 (the image's `HEALTHCHECK`) |
 | `mealier import-mealie <zip>` | import a Mealie backup into the data dir and print the report; stop the server first |
+| `mealier export <out.zip>` | zip of the database and every image; safe while the server runs |
+| `mealier restore <in.zip>` | check the zip and swap it in; refuses while the server runs, and keeps the old data in `pre-restore-<timestamp>/` |
+
+Export and restore are also in the UI (`/settings/backup`) and the API (`GET /api/export`, `POST /api/restore`, admins only).
+A restore through the UI or API makes the server exit after it answers, so the container needs `restart: unless-stopped`
+(or Sablier starting it on the next request).
 
 ```bash
 printf '%s' 'my password' | mealier hash-password > admin.hash && chmod 600 admin.hash

@@ -59,7 +59,7 @@ async fn local_login(State(db): State<Db>, Extension(auth): Extension<Arc<Auth>>
     // Always verify, whatever the username, so both mistakes cost the same.
     let ok = tokio::task::spawn_blocking(move || crate::auth::verify_password(&hash, &f.password) && f.username == "admin")
         .await
-        .map_err(|e| crate::Error::Io(std::io::Error::other(e.to_string())))?;
+        .map_err(|e| crate::Error::Internal(format!("password check task: {e}")))?;
     if !ok {
         return Ok(page(StatusCode::UNAUTHORIZED, &auth, "Wrong username or password."));
     }
@@ -102,19 +102,19 @@ struct CallbackQuery {
     error: Option<String>,
 }
 
-/// A failed sign-in as a page. Policy refusals say why; protocol failures are logged and shown generically.
+/// A failed sign-in as a page. Policy refusals say why, with the status every other route gives them;
+/// protocol failures are logged and shown generically.
 fn refusal(auth: &Auth, e: crate::Error) -> Response {
     use crate::Error::*;
     match e {
-        Forbidden(m) => page(StatusCode::FORBIDDEN, auth, &m),
-        TooMany(m) => page(StatusCode::TOO_MANY_REQUESTS, auth, &m),
+        Forbidden(_) | TooMany(_) => page(e.status(), auth, &e.to_string()),
         Validation(m) => {
             eprintln!("mealier: {m}");
             page(StatusCode::BAD_REQUEST, auth, "Sign-in failed. Try again, and tell an admin if it keeps happening.")
         }
         other => {
             eprintln!("mealier: {other}");
-            page(StatusCode::INTERNAL_SERVER_ERROR, auth, "Sign-in failed. Try again later.")
+            page(other.status(), auth, "Sign-in failed. Try again later.")
         }
     }
 }

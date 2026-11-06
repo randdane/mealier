@@ -6,7 +6,6 @@ use utoipa::ToSchema;
 
 use sqlx::{Row, Sqlite, Transaction};
 
-use crate::import::image_hash;
 use crate::{Batch, Db, Error, Image, Result, Scope};
 
 /// One row of the batch table. `recipe_*` is the snapshot's amount times the
@@ -76,21 +75,8 @@ pub(crate) fn check_scale(scale: f64) -> Result<()> {
     Err(Error::Validation("scale must be greater than 0".into()))
 }
 
-/// A lone `qty_min` is not a range; reject negatives and reversed ranges.
 fn normalise(l: &mut BatchLineInput) -> Result<()> {
-    match (l.qty_min, l.qty_max) {
-        (Some(min), None) => l.qty_max = Some(min),
-        (None, Some(_)) => return Err(Error::Validation("qty_max needs qty_min".into())),
-        _ => {}
-    }
-    if let (Some(min), Some(max)) = (l.qty_min, l.qty_max) {
-        if min < 0.0 || max < 0.0 {
-            return Err(Error::Validation("quantities must not be negative".into()));
-        }
-        if min > max {
-            return Err(Error::Validation("qty_min must not exceed qty_max".into()));
-        }
-    }
+    (l.qty_min, l.qty_max) = crate::recipes::range(l.qty_min, l.qty_max)?;
     Ok(())
 }
 
@@ -326,26 +312,19 @@ impl Db {
         self.notify(crate::Event::BatchLogged { batch_id: id, recipe_id: b.recipe_id, recipe_name, rating: b.rating, made_on: b.made_on.clone() });
         Ok(detail)
     }
-    /// Stores one photo for the batch (png, jpeg or webp by magic bytes).
-    // ponytail: stored as uploaded; resize-on-upload (spec, Architecture) is still owed.
+    /// Stores one photo for the batch (png, jpeg or webp; see `images`).
     pub async fn add_batch_photo(&self, sc: &Scope, id: i64, images_dir: &Path, bytes: &[u8]) -> Result<Image> {
-        let (mime, ext) = match bytes {
-            [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, ..] => ("image/png", "png"),
-            [0xff, 0xd8, 0xff, ..] => ("image/jpeg", "jpg"),
-            [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => ("image/webp", "webp"),
-            _ => return Err(Error::Validation("photo must be a png, jpeg or webp image".into())),
-        };
         if bytes.len() > MAX_PHOTO_BYTES {
             return Err(Error::Validation("photo must be at most 10 MB".into()));
         }
-        let hash = image_hash(bytes);
+        let photo = crate::images::prepare(bytes).await?;
         let mut tx = self.pool.begin().await?;
         if sqlx::query("SELECT 1 FROM batches WHERE id = ? AND household_id = ?").bind(id).bind(sc.household_id).fetch_optional(&mut *tx).await?.is_none() {
             return Err(Error::NotFound("batch"));
         }
         let already = sqlx::query("SELECT 1 FROM batch_photos WHERE batch_id = ? AND hash = ?")
             .bind(id)
-            .bind(&hash)
+            .bind(&photo.hash)
             .fetch_optional(&mut *tx)
             .await?
             .is_some();
@@ -353,17 +332,15 @@ impl Db {
         if !already && count >= MAX_PHOTOS {
             return Err(Error::Validation("a batch holds at most 5 photos".into()));
         }
-        // Content-addressed, so a file left behind by a failed commit is harmless (GC collects it).
-        std::fs::create_dir_all(images_dir)?;
-        std::fs::write(images_dir.join(format!("{hash}.{ext}")), bytes)?;
-        sqlx::query("INSERT OR IGNORE INTO images (hash, mime) VALUES (?, ?)").bind(&hash).bind(mime).execute(&mut *tx).await?;
+        photo.write(images_dir)?;
+        photo.record(&mut tx).await?;
         sqlx::query("INSERT OR IGNORE INTO batch_photos (batch_id, hash, position) VALUES (?, ?, ?)")
             .bind(id)
-            .bind(&hash)
+            .bind(&photo.hash)
             .bind(count)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(Image { hash, mime: mime.into() })
+        Ok(photo.image())
     }
 }

@@ -2,7 +2,7 @@
 
 Status: agreed 2026-11-05, revised after a Codex review the same day. Revised
 2026-11-06: groups and households, full Mealie-export coverage, export and
-restore, share links, scheduled webhooks on demand. Steps 1–10 of the build
+restore, share links, scheduled webhooks on demand. Steps 1–11 of the build
 order are implemented; the remaining work is under "Build order".
 
 ## Goal
@@ -31,12 +31,21 @@ Mealie and recorded in the README.
 - One binary: axum, askama templates, htmx for partial updates. Server-rendered
   HTML; no SPA.
 - SQLite in WAL mode through `sqlx`, with migrations in the repo.
-- Images on disk, content-addressed by hash, decoded and resized on upload
-  (longest side at most 2048 px; PNG, JPEG and WebP only), never rewritten.
+- Images on disk, content-addressed by the sha256 of the stored bytes, through
+  one module (`src/images.rs`): sniffed by magic bytes (PNG, JPEG and WebP
+  only), refused if wider or taller than 12000 px (read from the header, before
+  decoding) or if they do not decode, turned upright, shrunk to at most 2048 px
+  on the longest side, re-encoded in the same format (which drops EXIF) and
+  never rewritten afterwards. Uploads, URL imports and the Mealie importer all
+  use it; `images.mime` records the type and the image route serves from it.
   Shared by recipes, snapshots and batches. An image is deleted only by a
   separate garbage-collection step, never while an export runs, and only when
   nothing references it. Recipe assets (non-image attachments) use the same
   content-addressed store without decoding.
+- Errors map to responses in one place (`src/errors.rs`): JSON
+  `{"error": "..."}` under `/api/`, an HTML error page (status, message, way
+  back, navigation) everywhere else, and a redirect to the sign-in form for
+  an unauthenticated page. The path decides, never `Accept`.
 - Container: multi-stage build to a static musl binary in a distroless image,
   published to GHCR by CI.
 - Data directory (DB + images + assets) is a single volume.
@@ -139,6 +148,10 @@ Sablier stops the container when idle, so stop/start is routine.
 
 CRUD in the API and the HTML form for every recipe field: steps, sections,
 tags, categories, tools, cookbooks, images, assets, notes, settings, extras.
+(Today the form has name, description, ingredients, steps one per line,
+comma-separated tags, categories, tools and cookbooks, nutrition and an image;
+the rest arrives with step 14. A name used by a recipe is added to its group's
+vocabulary if it is new.)
 Search. Every save writes a snapshot. Locked recipes refuse edits until
 unlocked. Favourites and ratings per user.
 
@@ -171,7 +184,11 @@ result fills the form for the user to save, it is not written automatically.
 Screen Wake Lock keeps the screen on. A per-user setting, **cook theme**:
 `normal`, `high-contrast` or `max-white`. Steps can be ticked off. Cooking a
 batch shows that batch's snapshot (name, steps, sections) with the batch's
-actual amounts, never the live recipe.
+actual amounts, never the live recipe. An imported batch has no snapshot, so
+it shows the live recipe with a note that the historical version is
+unavailable. Ticks are kept in the browser's `localStorage` under
+`mealier:cook:recipe:<id>` or `mealier:cook:batch:<id>`; blocked storage just
+means they are not remembered, and nothing is sent to the server.
 
 ### Meal planner
 
@@ -300,13 +317,39 @@ nothing does by default. Imported ones start disabled.
 
 ### Backup and export
 
-Export is a zip of a DB copy made with the SQLite backup API plus every image
-and asset it references; images are immutable and not garbage-collected during
-an export, so the pair is consistent. Restore unpacks to a staging directory,
-validates it, then swaps it in, keeping the previous data until the swap
-succeeds. Both are admin-only, in the UI and as `mealier export` /
-`mealier restore`. The homelab's `docker-volume-backup` stops the container
-before backing up the volume, so that copy is consistent too.
+Export is a zip of a copy of the database made with `VACUUM INTO` (a read
+transaction: writers are not held up, and none is held during the zipping)
+plus every image and asset it references. Images are immutable and not
+garbage-collected during an export, so the pair is consistent. The copy is made
+in a staging directory under the data directory and removed afterwards; export
+fails, naming the file, if a referenced image is missing or does not match its
+hash.
+
+Restore unpacks to `<data dir>/restore-staging` and checks it before touching
+anything: every entry name is on an allowlist (`mealier.db`,
+`images/<sha256>.<png|jpg|webp>`; nothing with `..`, an absolute path or a
+subdirectory), the database opens and passes `quick_check`, it has a migrations
+table not newer than this binary (and matching its checksums), and every image
+it lists is present with a matching sha256. Only then is the current data
+moved to `<data dir>/pre-restore-<timestamp>/` and the staged data moved in; a
+failure at any step leaves the current data as it was. The old data is kept,
+never deleted by mealier.
+
+Both are admin-only, in the UI (`/settings/backup`) and the API
+(`GET /api/export` streams the zip, `POST /api/restore` takes the zip as the
+multipart field `file`), and as `mealier export <out.zip>` and
+`mealier restore <in.zip>`.
+
+- The server holds a lock on the data directory while it runs. `mealier restore`
+  takes the same lock and refuses, saying to stop the server, if it cannot.
+  `mealier export` needs no lock and works against a running server.
+- The running server cannot keep its old database pool open across a swap, so a
+  restore through the UI or API answers `202`, then the process exits (code 0)
+  and the container restarts it. Until it has gone, every request except
+  `/healthz` gets `503`. The stack must therefore restart the container on exit
+  (`restart: unless-stopped`; Sablier starting it on the next request also works).
+- The homelab's `docker-volume-backup` stops the container before backing up the
+  volume, so that copy is consistent too.
 
 ## Migration from Mealie
 
@@ -360,14 +403,14 @@ works.
 Done: 1. Schema, recipes, snapshots. 2. Mealie importer. 3. Batch log. 4. Cook
 mode. 5. URL importers and ingredient parser. 6. Meal planner and shopping list.
 7. Webhooks. 8. OIDC. 9. LLM fallbacks. Container image and CI. 10. Groups and
-households.
+households. 11. Review fixes: site-local IPv6, image module (decode, resize,
+one copy) with image hashes in snapshots, batch cook mode from the snapshot and
+remembered ticks, one quantity-range helper, export and restore, error mapping
+in one module with HTML error pages, `web.rs` split by page area, full recipe
+form.
 
 Remaining, in order:
 
-11. Review fixes: site-local IPv6, image hashes in snapshots, batch cook mode
-    from the snapshot, export and restore, full recipe form, image decode and
-    resize, one image module, one quantity-range helper, error mapping in one
-    module with HTML error pages, `web.rs` split by page area.
 12. Labels and shopping-list sections.
 13. Cookbook filters and meal-plan rules.
 14. Recipe features: assets, notes, sections, ingredient links, substitutions,
@@ -379,14 +422,14 @@ Remaining, in order:
 
 ## STATUS
 
-2026-11-06, paused for the session token limit.
+2026-11-06.
 
-- Phase: step 10 (groups and households) done and committed; 341 tests pass,
-  clippy clean.
+- Phase: step 11 (review fixes) done, not committed; 398 tests pass (1 ignored,
+  needs a real Mealie backup), clippy clean with `-D warnings`.
 - In flight: nothing. No agents or servers running.
 - Blocked on the owner: nothing until deploy (step 17 needs a GitHub repo,
   an Authentik application, and secrets).
-- Next: step 11, review fixes (list under "Build order"). Then 12–16 without
+- Next: step 12 (labels and shopping-list sections), then 13–16 without
   stopping unless a decision is needed.
 - Production Mealie still holds the `mealier-fixture` items and three extra
   backups; `scripts/cleanup-mealie-fixture.py` removes the items after step 16

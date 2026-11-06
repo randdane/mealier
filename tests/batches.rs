@@ -319,13 +319,18 @@ async fn list_batches_puts_undated_planned_batches_first() {
     assert_eq!(ids, vec![planned.batch.id, dated.batch.id]);
 }
 
-const PNG: &[u8] = b"\x89PNG\r\n\x1a\nhello";
-const JPEG: &[u8] = b"\xff\xd8\xffjpg";
-const WEBP: &[u8] = b"RIFF\x00\x00\x00\x00WEBPvp8";
+fn png() -> Vec<u8> {
+    common::png(8, 8, 0)
+}
 
 async fn a_batch(db: &Db) -> i64 {
     let (r, ..) = pancakes(db).await;
     db.start_batch(&common::scope(db).await, r.id, 1.0).await.unwrap().batch.id
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[tokio::test]
@@ -334,11 +339,12 @@ async fn add_batch_photo_stores_the_file_by_sha256_and_lists_it() {
     let id = a_batch(&db).await;
     let dir = tempfile::tempdir().unwrap();
 
-    let img = db.add_batch_photo(&common::scope(&db).await, id, dir.path(), PNG).await.unwrap();
+    let img = db.add_batch_photo(&common::scope(&db).await, id, dir.path(), &png()).await.unwrap();
 
-    assert_eq!(img.hash, "0e8754cfeb908584f7a2f2ccd08e37fda8d3d540cbaf2e16ac559c7ea59a7151");
+    // Named by the sha256 of what is stored: the re-encoded image, not the upload.
+    let stored = std::fs::read(dir.path().join(format!("{}.png", img.hash))).unwrap();
+    assert_eq!(img.hash, sha256_hex(&stored));
     assert_eq!(img.mime, "image/png");
-    assert_eq!(std::fs::read(dir.path().join(format!("{}.png", img.hash))).unwrap(), PNG);
     assert_eq!(db.get_batch(&common::scope(&db).await, id).await.unwrap().photos, vec![img]);
 }
 
@@ -348,11 +354,10 @@ async fn add_batch_photo_accepts_jpeg_and_webp_by_magic_bytes() {
     let id = a_batch(&db).await;
     let dir = tempfile::tempdir().unwrap();
 
-    let j = db.add_batch_photo(&common::scope(&db).await, id, dir.path(), JPEG).await.unwrap();
-    let w = db.add_batch_photo(&common::scope(&db).await, id, dir.path(), WEBP).await.unwrap();
+    let j = db.add_batch_photo(&common::scope(&db).await, id, dir.path(), &common::jpeg(8, 8, 0)).await.unwrap();
+    let w = db.add_batch_photo(&common::scope(&db).await, id, dir.path(), &common::webp(8, 8, 0)).await.unwrap();
 
-    assert_eq!((j.mime.as_str(), j.hash.as_str()), ("image/jpeg", "ffe44c37b0cbca06b59be3a612c30edafd3a420b0cd8339a626069ec5c3dcda8"));
-    assert_eq!((w.mime.as_str(), w.hash.as_str()), ("image/webp", "dbbf62bee764399bcd586c2f2ed25d03fbfe8ccfa54f5a85022bba4366e8cadd"));
+    assert_eq!((j.mime.as_str(), w.mime.as_str()), ("image/jpeg", "image/webp"));
     assert!(dir.path().join(format!("{}.jpg", j.hash)).exists());
     assert!(dir.path().join(format!("{}.webp", w.hash)).exists());
 }
@@ -375,7 +380,7 @@ async fn add_batch_photo_rejects_more_than_10_mb() {
     let db = Db::open_memory().await.unwrap();
     let id = a_batch(&db).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut big = PNG.to_vec();
+    let mut big = png();
     big.resize(10 * 1024 * 1024, 0);
     db.add_batch_photo(&common::scope(&db).await, id, dir.path(), &big).await.unwrap();
     big.push(0);
@@ -387,19 +392,15 @@ async fn a_batch_holds_at_most_5_photos_and_the_same_photo_counts_once() {
     let db = Db::open_memory().await.unwrap();
     let id = a_batch(&db).await;
     let dir = tempfile::tempdir().unwrap();
-    db.add_batch_photo(&common::scope(&db).await, id, dir.path(), PNG).await.unwrap();
-    db.add_batch_photo(&common::scope(&db).await, id, dir.path(), PNG).await.unwrap();
+    db.add_batch_photo(&common::scope(&db).await, id, dir.path(), &png()).await.unwrap();
+    db.add_batch_photo(&common::scope(&db).await, id, dir.path(), &png()).await.unwrap();
     assert_eq!(db.get_batch(&common::scope(&db).await, id).await.unwrap().photos.len(), 1);
-    for n in 0..4u8 {
-        let mut p = JPEG.to_vec();
-        p.push(n);
-        db.add_batch_photo(&common::scope(&db).await, id, dir.path(), &p).await.unwrap();
+    for n in 1..5u8 {
+        db.add_batch_photo(&common::scope(&db).await, id, dir.path(), &common::jpeg(8, 8, n * 60)).await.unwrap();
     }
     assert_eq!(db.get_batch(&common::scope(&db).await, id).await.unwrap().photos.len(), 5);
 
-    let mut sixth = JPEG.to_vec();
-    sixth.push(99);
-    assert!(matches!(db.add_batch_photo(&common::scope(&db).await, id, dir.path(), &sixth).await, Err(Error::Validation(_))));
+    assert!(matches!(db.add_batch_photo(&common::scope(&db).await, id, dir.path(), &common::jpeg(8, 8, 99)).await, Err(Error::Validation(_))));
     assert_eq!(db.get_batch(&common::scope(&db).await, id).await.unwrap().photos.len(), 5);
 }
 
@@ -407,5 +408,5 @@ async fn a_batch_holds_at_most_5_photos_and_the_same_photo_counts_once() {
 async fn add_batch_photo_to_a_missing_batch_is_not_found() {
     let db = Db::open_memory().await.unwrap();
     let dir = tempfile::tempdir().unwrap();
-    assert!(matches!(db.add_batch_photo(&common::scope(&db).await, 999, dir.path(), PNG).await, Err(Error::NotFound("batch"))));
+    assert!(matches!(db.add_batch_photo(&common::scope(&db).await, 999, dir.path(), &png()).await, Err(Error::NotFound("batch"))));
 }

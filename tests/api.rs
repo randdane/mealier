@@ -265,6 +265,8 @@ async fn openapi_lists_every_recipe_route() {
         "POST /api/households",
         "GET /api/default-household",
         "PUT /api/default-household",
+        "GET /api/export",
+        "POST /api/restore",
     ];
     expected.sort();
     assert_eq!(found, expected);
@@ -417,6 +419,11 @@ async fn get_recipe_batches_returns_200_newest_first_and_404_for_a_missing_recip
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// POST of one multipart file field named `photo`.
 async fn upload(app: &Router, uri: &str, field: &str, bytes: &[u8]) -> (StatusCode, Value) {
     let mut body = format!("--XB\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"p\"\r\n\r\n").into_bytes();
@@ -435,7 +442,9 @@ async fn upload(app: &Router, uri: &str, field: &str, bytes: &[u8]) -> (StatusCo
     (status, if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() })
 }
 
-const PNG: &[u8] = b"\x89PNG\r\n\x1a\nhello";
+fn png() -> Vec<u8> {
+    common::png(8, 8, 0)
+}
 
 #[tokio::test]
 async fn post_batch_photos_returns_201_and_stores_the_file() {
@@ -446,11 +455,13 @@ async fn post_batch_photos_returns_201_and_stores_the_file() {
     common::sign_in(&db).await;
     let app = api::router(api::AppState { db: db.clone(), images_dir: dir.path().to_path_buf() });
 
-    let (status, body) = upload(&app, &format!("/api/batches/{b}/photos"), "photo", PNG).await;
+    let (status, body) = upload(&app, &format!("/api/batches/{b}/photos"), "photo", &png()).await;
 
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(body["photos"][0]["hash"], "0e8754cfeb908584f7a2f2ccd08e37fda8d3d540cbaf2e16ac559c7ea59a7151");
-    assert!(dir.path().join("0e8754cfeb908584f7a2f2ccd08e37fda8d3d540cbaf2e16ac559c7ea59a7151.png").exists());
+    // The name is the sha256 of what is stored, which is the re-encoded image, not the upload.
+    let hash = body["photos"][0]["hash"].as_str().unwrap();
+    let stored = std::fs::read(dir.path().join(format!("{hash}.png"))).unwrap();
+    assert_eq!(hash, sha256_hex(&stored));
 }
 
 #[tokio::test]
@@ -460,16 +471,12 @@ async fn post_batch_photos_rejects_non_images_a_missing_field_and_a_sixth_photo_
     let uri = format!("/api/batches/{b}/photos");
     let (status, _) = upload(&app, &uri, "photo", b"not an image").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let (status, _) = upload(&app, &uri, "other", PNG).await;
+    let (status, _) = upload(&app, &uri, "other", &png()).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     for n in 0..5u8 {
-        let mut p = PNG.to_vec();
-        p.push(n);
-        assert_eq!(upload(&app, &uri, "photo", &p).await.0, StatusCode::CREATED);
+        assert_eq!(upload(&app, &uri, "photo", &common::png(8, 8, n)).await.0, StatusCode::CREATED);
     }
-    let mut sixth = PNG.to_vec();
-    sixth.push(9);
-    let (status, body) = upload(&app, &uri, "photo", &sixth).await;
+    let (status, body) = upload(&app, &uri, "photo", &common::png(8, 8, 9)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body["error"].as_str().unwrap().contains("5 photos"), "{body}");
 }
@@ -478,7 +485,7 @@ async fn post_batch_photos_rejects_non_images_a_missing_field_and_a_sixth_photo_
 async fn post_batch_photos_over_10_mb_returns_422() {
     let (app, db, rid) = app_with_recipe().await;
     let b = db.start_batch(&common::scope(&db).await, rid, 1.0).await.unwrap().batch.id;
-    let mut big = PNG.to_vec();
+    let mut big = png();
     big.resize(10 * 1024 * 1024 + 1, 0);
     let (status, _) = upload(&app, &format!("/api/batches/{b}/photos"), "photo", &big).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -487,7 +494,7 @@ async fn post_batch_photos_over_10_mb_returns_422() {
 #[tokio::test]
 async fn post_batch_photos_missing_batch_returns_404() {
     let (app, ..) = app_with_recipe().await;
-    let (status, _) = upload(&app, "/api/batches/999/photos", "photo", PNG).await;
+    let (status, _) = upload(&app, "/api/batches/999/photos", "photo", &png()).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -517,6 +524,75 @@ async fn cook_page_shows_every_step_scaled_ingredients_and_requests_a_wake_lock(
     assert!(html.contains("navigator.wakeLock.request('screen')"));
     assert!(html.contains("<li>6</li>"), "scaled amount missing: {html}");
     assert!(html.contains("cook-normal"));
+}
+
+#[tokio::test]
+async fn cooking_a_batch_shows_the_steps_and_name_it_was_started_with_not_the_edited_recipe() {
+    let app = router_for(Db::open_memory().await.unwrap()).await;
+    let (_, r) = send(&app, "POST", "/api/recipes", Some(json!({"name": "Old Soup", "steps": ["Chop the onion", "Simmer 20 min"], "ingredients": [{"original_text": "2 onions", "qty_min": 2.0, "qty_max": 2.0}]}))).await;
+    let id = r["id"].as_i64().unwrap();
+    let (_, b) = send(&app, "POST", &format!("/api/recipes/{id}/batches"), Some(json!({"scale": 1.0}))).await;
+    let batch = b["id"].as_i64().unwrap();
+    let (s, _) = send(&app, "PUT", &format!("/api/recipes/{id}"), Some(json!({"name": "New Stew", "steps": ["Throw it in the pot"]}))).await;
+    assert_eq!(s, StatusCode::OK);
+
+    let (status, _, html) = raw(&app, "GET", &format!("/recipes/{id}/cook?batch={batch}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Old Soup") && html.contains("Chop the onion") && html.contains("Simmer 20 min"), "{html}");
+    assert!(!html.contains("New Stew") && !html.contains("Throw it in the pot"), "the live recipe leaked in: {html}");
+    assert!(html.contains("2 onions") || html.contains("<li>2</li>"), "{html}");
+
+    // Cooking the recipe itself still shows the live version.
+    let (_, _, live) = raw(&app, "GET", &format!("/recipes/{id}/cook"), None).await;
+    assert!(live.contains("New Stew") && live.contains("Throw it in the pot") && !live.contains("Chop the onion"), "{live}");
+}
+
+#[tokio::test]
+async fn cooking_an_imported_batch_with_no_snapshot_shows_the_live_recipe_and_says_so() {
+    let db = Db::open_memory().await.unwrap();
+    let sc = common::scope(&db).await;
+    let r = db.create_recipe(&sc, mealier::RecipeInput { name: "Live Soup".into(), steps: vec!["Live step".into()], ..Default::default() }).await.unwrap();
+    let batch: i64 = sqlx::query_scalar("INSERT INTO batches (household_id, status, recipe_id, snapshot_id, source, made_on) VALUES (?, 'done', ?, NULL, 'imported', '2024-01-01') RETURNING id")
+        .bind(sc.household_id)
+        .bind(r.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    let app = router_for(db).await;
+
+    let (status, _, html) = raw(&app, "GET", &format!("/recipes/{}/cook?batch={batch}", r.id), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Live Soup") && html.contains("Live step"), "{html}");
+    assert!(html.contains("historical version unavailable"), "{html}");
+
+    // A native batch carries no such note.
+    let (_, b) = send(&app, "POST", &format!("/api/recipes/{}/batches", r.id), Some(json!({"scale": 1.0}))).await;
+    let (_, _, native) = raw(&app, "GET", &format!("/recipes/{}/cook?batch={}", r.id, b["id"]), None).await;
+    assert!(!native.contains("historical version unavailable"), "{native}");
+}
+
+#[tokio::test]
+async fn cook_mode_remembers_ticked_steps_in_local_storage_under_a_per_recipe_or_per_batch_key() {
+    let app = router_for(Db::open_memory().await.unwrap()).await;
+    let (_, r) = send(&app, "POST", "/api/recipes", Some(json!({"name": "Soup", "steps": ["Chop", "Simmer"]}))).await;
+    let id = r["id"].as_i64().unwrap();
+    let (_, b) = send(&app, "POST", &format!("/api/recipes/{id}/batches"), Some(json!({"scale": 1.0}))).await;
+    let batch = b["id"].as_i64().unwrap();
+
+    let (_, _, recipe_page) = raw(&app, "GET", &format!("/recipes/{id}/cook"), None).await;
+    assert!(recipe_page.contains(&format!("mealier:cook:recipe:{id}")), "{recipe_page}");
+    let (_, _, batch_page) = raw(&app, "GET", &format!("/recipes/{id}/cook?batch={batch}"), None).await;
+    assert!(batch_page.contains(&format!("mealier:cook:batch:{batch}")), "{batch_page}");
+    assert!(!batch_page.contains(&format!("mealier:cook:recipe:{id}")));
+
+    for html in [&recipe_page, &batch_page] {
+        // Blocked storage (private mode, cookies off) must not break the page: every access is inside a try.
+        assert!(html.contains("localStorage") && html.contains("try {") && html.contains("catch"), "{html}");
+        // Nothing leaves the browser.
+        for call in ["fetch(", "XMLHttpRequest", "sendBeacon", "WebSocket"] {
+            assert!(!html.contains(call), "{call} in the cook page");
+        }
+    }
 }
 
 #[tokio::test]

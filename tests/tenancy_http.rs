@@ -38,7 +38,7 @@ async fn send(app: &Router, method: &str, uri: &str, bearer: Option<&str>, body:
         Req::Photo => {
             req = req.header("content-type", "multipart/form-data; boundary=XX");
             let mut b = b"--XX\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n".to_vec();
-            b.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+            b.extend_from_slice(&common::png(4, 4, 1));
             b.extend_from_slice(b"\r\n--XX--\r\n");
             Body::from(b)
         }
@@ -297,7 +297,16 @@ async fn api_routes_are_all_listed() {
 
 #[test]
 fn html_routes_are_all_listed() {
-    let src = include_str!("../src/web.rs");
+    // The page modules together; src/web.rs was split by page area.
+    let src = [
+        include_str!("../src/web/mod.rs"),
+        include_str!("../src/web/recipes.rs"),
+        include_str!("../src/web/batches.rs"),
+        include_str!("../src/web/planner.rs"),
+        include_str!("../src/web/shopping.rs"),
+        include_str!("../src/web/settings.rs"),
+    ]
+    .join("\n");
     let mut in_source = BTreeSet::new();
     for chunk in src.split(".route(").skip(1) {
         let chunk = chunk.trim_start();
@@ -311,7 +320,7 @@ fn html_routes_are_all_listed() {
     let elsewhere: BTreeSet<String> = ["/settings/webhooks/{id}/delete", "/settings/webhooks/{id}/toggle", "/settings/webhooks/{id}/test", "/images/{id}"].map(String::from).into();
     let listed: BTreeSet<String> = html_routes().iter().map(|r| normalised(r.path)).collect();
     let expected: BTreeSet<String> = in_source.difference(&elsewhere).cloned().collect();
-    assert_eq!(listed, expected, "src/web.rs has a route with an id that the table does not cover (or the table lists one that is gone)");
+    assert_eq!(listed, expected, "src/web/ has a route with an id that the table does not cover (or the table lists one that is gone)");
     assert!(in_source.is_superset(&elsewhere), "stale exemption");
 }
 
@@ -427,7 +436,7 @@ async fn images_are_served_only_to_the_tenant_that_owns_them() {
     std::fs::write(w.images.join(&loose), b"nobody's image").unwrap();
     sqlx::query("INSERT INTO images (hash, mime) VALUES (?, 'image/png')").bind("a".repeat(64)).execute(w.db.pool()).await.unwrap();
     sqlx::query("INSERT INTO recipe_images (recipe_id, hash) VALUES (?, ?)").bind(w.ids.recipe).bind("a".repeat(64)).execute(w.db.pool()).await.unwrap();
-    let photo = w.db.add_batch_photo(&w.t.a, w.ids.batch, &w.images, &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 9, 9]).await.unwrap().file_name();
+    let photo = w.db.add_batch_photo(&w.t.a, w.ids.batch, &w.images, &common::png(4, 4, 9)).await.unwrap().file_name();
 
     let status = |token: &str, name: &str| {
         let (app, t, uri) = (w.app.clone(), token.to_string(), format!("/images/{name}"));

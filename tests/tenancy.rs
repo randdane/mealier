@@ -17,9 +17,7 @@ fn named(name: &str) -> RecipeInput {
 }
 
 fn png() -> Vec<u8> {
-    let mut b = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
-    b.extend_from_slice(&[0; 16]);
-    b
+    common::png(4, 4, 0)
 }
 
 // ---------- S35: recipes, units, foods ----------

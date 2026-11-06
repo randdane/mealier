@@ -9,7 +9,7 @@ use mealier::fetch::{Fetcher, is_public};
 fn ip_policy_table() {
     let refused = [
         "127.0.0.1", "10.1.2.3", "172.20.0.1", "192.168.40.7", "100.100.3.4", "169.254.169.254", "0.0.0.0", "224.0.0.1",
-        "::1", "::", "fd00::1", "fe80::1", "ff02::1", "::ffff:192.168.1.1", "::ffff:127.0.0.1", "::ffff:100.100.3.4", "64:ff9b::a00:1",
+        "::1", "::", "fd00::1", "fe80::1", "fec0::1", "feff::1", "ff02::1", "::ffff:192.168.1.1", "::ffff:127.0.0.1", "::ffff:100.100.3.4", "64:ff9b::a00:1",
     ];
     for a in refused {
         assert!(!is_public(a.parse::<IpAddr>().unwrap()), "{a} should be refused");

@@ -23,7 +23,7 @@ pub fn hash_token(secret: &str) -> String {
 /// `prefix` plus 32 random bytes from the OS, as hex.
 pub(crate) fn random_secret(prefix: &str) -> Result<String> {
     let mut b = [0u8; 32];
-    getrandom::fill(&mut b).map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
+    getrandom::fill(&mut b).map_err(|e| Error::Internal(e.to_string()))?;
     Ok(format!("{prefix}{}", b.iter().map(|b| format!("{b:02x}")).collect::<String>()))
 }
 
@@ -235,7 +235,7 @@ pub fn hash_password(password: &str) -> Result<String> {
     if password.chars().count() < MIN_PASSWORD_LEN {
         return Err(Error::Validation(format!("the password must be at least {MIN_PASSWORD_LEN} characters")));
     }
-    let hash = argon2::Argon2::default().hash_password(password.as_bytes()).map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
+    let hash = argon2::Argon2::default().hash_password(password.as_bytes()).map_err(|e| Error::Internal(e.to_string()))?;
     Ok(hash.to_string())
 }
 

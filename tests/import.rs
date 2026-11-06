@@ -204,18 +204,20 @@ async fn recipe_images_are_stored_under_their_sha256() {
     use sha2::{Digest, Sha256};
     let (db, report, dir) = imported().await;
     assert_eq!(report.images, 1);
-    let hash = "c1372d09b33530862330ee4c1426ba3ec3f7646de551d0e074c0ac5067020fb5";
-
+    // The importer re-encodes the original like any upload, so the name is the hash of what is stored.
     let files: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
-    assert_eq!(files, vec![format!("{hash}.webp")]);
-    let bytes = std::fs::read(dir.path().join(format!("{hash}.webp"))).unwrap();
+    assert_eq!(files.len(), 1);
+    let hash = files[0].strip_suffix(".webp").expect("a .webp file").to_string();
+    let bytes = std::fs::read(dir.path().join(&files[0])).unwrap();
     let digest: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
-    assert_eq!((bytes.len(), digest.as_str()), (66, hash));
+    assert_eq!(digest, hash);
+    let (w, h) = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().unwrap().into_dimensions().unwrap();
+    assert_eq!((w, h), (8, 8), "the fixture's 8x8 image");
 
     let a = recipe(&db, "mealier-fixture-recipe-a").await;
     let b = recipe(&db, "mealier-fixture-recipe-b").await;
     let imgs = db.recipe_images(&tenant(&db).await, a.id).await.unwrap();
-    assert_eq!(imgs.iter().map(|i| (i.hash.as_str(), i.mime.as_str())).collect::<Vec<_>>(), vec![(hash, "image/webp")]);
+    assert_eq!(imgs.iter().map(|i| (i.hash.as_str(), i.mime.as_str())).collect::<Vec<_>>(), vec![(hash.as_str(), "image/webp")]);
     assert!(db.recipe_images(&tenant(&db).await, b.id).await.unwrap().is_empty());
 }
 
@@ -556,4 +558,17 @@ async fn a_backup_that_crosses_groups_or_lacks_households_is_refused_whole() {
     let err = import_mealie_backup(&db, &zip, &images).await.unwrap_err();
     assert!(matches!(err, mealier::Error::Validation(_)), "{err}");
     assert_empty(&db, &images).await;
+}
+
+#[tokio::test]
+async fn an_imported_recipes_one_snapshot_lists_its_image() {
+    let (db, _, _dir) = imported().await;
+    let sc = tenant(&db).await;
+    let a = recipe(&db, "mealier-fixture-recipe-a").await;
+    let hashes: Vec<String> = db.recipe_images(&sc, a.id).await.unwrap().into_iter().map(|i| i.hash).collect();
+    assert_eq!(hashes.len(), 1);
+    assert_eq!(db.snapshots(&sc, a.id).await.unwrap().len(), 1);
+    assert_eq!(a.content.images, hashes);
+    let b = recipe(&db, "mealier-fixture-recipe-b").await;
+    assert!(b.content.images.is_empty());
 }

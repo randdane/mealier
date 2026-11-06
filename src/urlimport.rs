@@ -354,13 +354,12 @@ impl ImportService {
         let (mut input, image) = map_jsonld(&ld, &page.final_url, &units, &foods).ok_or_else(|| Error::Validation("no recipe found on that page".into()))?;
         let all = vec![true; input.ingredients.len()];
         let suggested = self.fill_lines(&mut input.ingredients, &all, &units, &foods).await;
-        let recipe = db.create_recipe(sc, input).await?;
-        if let Some(img) = image {
-            // A missing or bad image never fails the import.
-            if let Err(e) = self.attach_image(db, images_dir, recipe.id, &img).await {
-                eprintln!("mealier: import image skipped url={img} reason={e}");
-            }
-        }
+        // The image comes first, so the recipe's one snapshot already lists it. A missing or bad image never fails the import.
+        let photo = match image {
+            Some(img) => self.fetch_image(&img).await.inspect_err(|e| eprintln!("mealier: import image skipped url={img} reason={e}")).ok(),
+            None => None,
+        };
+        let recipe = db.create_recipe_with(sc, input, photo.as_ref().map(|p| (p, images_dir))).await?;
         Ok((recipe, suggested))
     }
 
@@ -377,21 +376,8 @@ impl ImportService {
         filled.into_iter().map(|j| idx[j]).collect()
     }
 
-    async fn attach_image(&self, db: &Db, dir: &Path, recipe_id: i64, url: &str) -> Result<()> {
-        let bytes = self.fetcher.get(url).await?.body;
-        let (mime, ext) = match bytes.as_slice() {
-            [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, ..] => ("image/png", "png"),
-            [0xff, 0xd8, 0xff, ..] => ("image/jpeg", "jpg"),
-            [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => ("image/webp", "webp"),
-            _ => return Err(Error::Validation("not a png, jpeg or webp image".into())),
-        };
-        let hash = crate::import::image_hash(&bytes);
-        std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join(format!("{hash}.{ext}")), &bytes)?;
-        let pool = db.pool();
-        sqlx::query("INSERT OR IGNORE INTO images (hash, mime) VALUES (?, ?)").bind(&hash).bind(mime).execute(pool).await?;
-        sqlx::query("INSERT INTO recipe_images (recipe_id, hash) VALUES (?, ?)").bind(recipe_id).bind(&hash).execute(pool).await?;
-        Ok(())
+    async fn fetch_image(&self, url: &str) -> Result<crate::images::Processed> {
+        crate::images::prepare(&self.fetcher.get(url).await?.body).await
     }
 }
 
@@ -467,7 +453,7 @@ pub(crate) fn first_number(v: &Value) -> Option<f64> {
 pub fn map_jsonld(ld: &Value, final_url: &str, units: &[Unit], foods: &[Food]) -> Option<(RecipeInput, Option<String>)> {
     let r = find_recipe(ld)?;
     let text = |k: &str| r[k].as_str().map(|s| s.trim().to_string()).unwrap_or_default();
-    let ingredients = strings_lines(&r["recipeIngredient"]).iter().map(|l| crate::web::parsed_input(l, units, foods)).collect::<Vec<IngredientInput>>();
+    let ingredients = strings_lines(&r["recipeIngredient"]).iter().map(|l| crate::parse::parsed_input(l, units, foods)).collect::<Vec<IngredientInput>>();
     let mut st = Vec::new();
     steps(&r["recipeInstructions"], &mut st);
     let n = &r["nutrition"];

@@ -4,6 +4,7 @@
 {% block content %}
 <p><a href="{{ back }}">Back</a></p>
 <h1>{{ name }}</h1>
+{% if historical_unavailable %}<p class="note">This batch was imported, so the recipe as it was is gone (historical version unavailable). This is the recipe as it is now.</p>{% endif %}
 <p id="wake-note" hidden>This browser can't keep the screen on.</p>
 
 <h2>Ingredients</h2>
@@ -12,7 +13,7 @@
 </ul>
 
 <h2>Steps</h2>
-<ol class="steps">
+<ol class="steps" data-key="mealier:cook:{{ key }}">
 {% for s in steps %}<li><label><input type="checkbox"><span>{{ s }}</span></label></li>{% endfor %}
 </ol>
 
@@ -26,6 +27,24 @@
   <button type="submit">Set</button>
 </form>
 
+<script>
+// Ticked steps survive a reload or a locked phone. Local to this browser; storage may be blocked, and then the page works unticked.
+(function () {
+  var ol = document.querySelector('ol.steps');
+  if (!ol) return;
+  var key = ol.getAttribute('data-key');
+  var boxes = ol.querySelectorAll('input[type=checkbox]');
+  try {
+    var done = JSON.parse(localStorage.getItem(key) || '[]');
+    for (var i = 0; i < boxes.length; i++) boxes[i].checked = done.indexOf(i) >= 0;
+  } catch (e) {}
+  ol.addEventListener('change', function () {
+    var ticked = [];
+    for (var i = 0; i < boxes.length; i++) if (boxes[i].checked) ticked.push(i);
+    try { localStorage.setItem(key, JSON.stringify(ticked)); } catch (e) {}
+  });
+})();
+</script>
 <script>
 (function () {
   if (!('wakeLock' in navigator)) { document.getElementById('wake-note').hidden = false; return; }

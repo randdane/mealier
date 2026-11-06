@@ -230,15 +230,9 @@ impl Db {
     }
 }
 
-/// A lone `qty` is not a range; reject negatives, reversed ranges, unknown ids and an item with nothing to buy.
+/// A range per `recipes::range`, known units and foods, and an item with something to buy.
 async fn check_item(db: &Db, sc: &Scope, mut i: ItemInput) -> Result<ItemInput> {
-    match (i.qty, i.qty_max) {
-        (Some(min), None) => i.qty_max = Some(min),
-        (None, Some(_)) => return Err(Error::Validation("qty_max needs qty".into())),
-        (Some(min), Some(max)) if min < 0.0 || max < 0.0 => return Err(Error::Validation("quantities must not be negative".into())),
-        (Some(min), Some(max)) if min > max => return Err(Error::Validation("qty must not exceed qty_max".into())),
-        _ => {}
-    }
+    (i.qty, i.qty_max) = crate::recipes::range(i.qty, i.qty_max)?;
     if i.food_id.is_none() && i.note.trim().is_empty() {
         return Err(Error::Validation("an item needs a food or a note".into()));
     }

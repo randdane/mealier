@@ -2,10 +2,19 @@
 {% block title %}{{ heading }} - mealier{% endblock %}
 {% block content %}
 <h1>{{ heading }}</h1>
-<form method="post" action="{{ action }}">
+<form method="post" action="{{ action }}" enctype="multipart/form-data">
   <label class="block">Name <input type="text" name="name" value="{{ name }}" required></label>
   <label class="block">Description <textarea name="description" rows="3">{{ description }}</textarea></label>
   <label class="block">Ingredients (one per line) <textarea name="ingredients" rows="10">{{ ingredients }}</textarea></label>
+  <label class="block">Steps (one per line) <textarea name="steps" rows="8">{{ steps }}</textarea></label>
+  <label class="block">Tags (comma separated) <input type="text" name="tags" value="{{ tags }}"></label>
+  <label class="block">Categories (comma separated) <input type="text" name="categories" value="{{ categories }}"></label>
+  <label class="block">Tools (comma separated) <input type="text" name="tools" value="{{ tools }}"></label>
+  <label class="block">Cookbooks (comma separated) <input type="text" name="cookbooks" value="{{ cookbooks }}"></label>
+  <label class="block">Image (png, jpeg or webp; replaces the current one)
+    {% if !image.is_empty() %}<img src="/images/{{ image }}" alt="Current image" class="current">{% endif %}
+    <input type="file" name="image" accept="image/png,image/jpeg,image/webp">
+  </label>
   {{ nutrition|safe }}
   <div class="buttons"><button type="submit">Save and review ingredients</button></div>
 </form>

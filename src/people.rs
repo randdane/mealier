@@ -102,13 +102,7 @@ pub struct Comment {
 impl Image {
     /// The file under the images dir: `<hash>.<ext>`.
     pub fn file_name(&self) -> String {
-        let ext = match self.mime.as_str() {
-            "image/png" => "png",
-            "image/webp" => "webp",
-            "image/gif" => "gif",
-            _ => "jpg",
-        };
-        format!("{}.{ext}", self.hash)
+        format!("{}.{}", self.hash, crate::images::ext(&self.mime).unwrap_or("bin"))
     }
 }
 
@@ -270,18 +264,18 @@ impl Db {
         Ok(ShoppingList { id, name, items })
     }
 
-    /// Is the image named by `hash` used by a recipe in the caller's group or a batch of their household?
-    pub(crate) async fn image_visible(&self, sc: &Scope, hash: &str) -> Result<bool> {
-        let found = sqlx::query(
-            "SELECT 1 WHERE EXISTS (SELECT 1 FROM recipe_images ri JOIN recipes r ON r.id = ri.recipe_id WHERE ri.hash = ?1 AND r.group_id = ?2)
-                 OR EXISTS (SELECT 1 FROM batch_photos bp JOIN batches b ON b.id = bp.batch_id WHERE bp.hash = ?1 AND b.household_id = ?3)",
+    /// The mime type of the image named by `hash`, if a recipe in the caller's group or a batch of their household uses it.
+    pub(crate) async fn image_mime(&self, sc: &Scope, hash: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT i.mime FROM images i WHERE i.hash = ?1 AND (
+                 EXISTS (SELECT 1 FROM recipe_images ri JOIN recipes r ON r.id = ri.recipe_id WHERE ri.hash = ?1 AND r.group_id = ?2)
+              OR EXISTS (SELECT 1 FROM batch_photos bp JOIN batches b ON b.id = bp.batch_id WHERE bp.hash = ?1 AND b.household_id = ?3))",
         )
         .bind(hash)
         .bind(sc.group_id)
         .bind(sc.household_id)
         .fetch_optional(&self.pool)
-        .await?;
-        Ok(found.is_some())
+        .await?)
     }
 
     pub async fn recipe_images(&self, sc: &Scope, recipe_id: i64) -> Result<Vec<Image>> {

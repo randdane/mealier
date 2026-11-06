@@ -135,7 +135,7 @@ fn loopback(ip: IpAddr) -> bool {
 async fn serve() -> String {
     let app = Router::new()
         .route("/r", get(|| async { ([("content-type", "text/html")], fixture("pages/plain.html")) }))
-        .route("/img/pan.jpg", get(|| async { vec![0xffu8, 0xd8, 0xff, 0xe0, 1, 2, 3] }))
+        .route("/img/pan.jpg", get(|| async { common::jpeg(16, 16, 3) }))
         .route("/none", get(|| async { fixture("pages/none.html") }));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
@@ -180,4 +180,25 @@ async fn post_import_with_the_default_fetcher_refuses_a_private_target() {
     let app = api::router(api::AppState { db, images_dir: tempfile::tempdir().unwrap().keep() });
     let (status, body) = post_import(&app, &format!("{base}/r")).await;
     assert_eq!((status, body["error"].as_str().unwrap()), (422, "address is not allowed (private, loopback or internal)"));
+}
+
+#[tokio::test]
+async fn an_imported_recipes_one_snapshot_already_lists_its_image() {
+    let base = serve().await;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open_memory().await.unwrap();
+    let svc = ImportService::new(Fetcher::with_allow(loopback), Chain::build("jsonld,microdata", None).unwrap());
+    common::sign_in(&db).await;
+    let app = api::router_with(api::AppState { db: db.clone(), images_dir: dir.path().to_path_buf() }, svc);
+    let (status, body) = post_import(&app, &format!("{base}/r")).await;
+    assert_eq!(status, 201, "{body}");
+
+    let sc = common::scope(&db).await;
+    let id = body["id"].as_i64().unwrap();
+    let snaps = db.snapshots(&sc, id).await.unwrap();
+    assert_eq!(snaps.len(), 1, "the image did not cost a second snapshot");
+    let hashes: Vec<String> = db.recipe_images(&sc, id).await.unwrap().into_iter().map(|i| i.hash).collect();
+    assert_eq!(hashes.len(), 1);
+    assert_eq!(db.snapshot(&sc, snaps[0].id).await.unwrap().content.images, hashes);
+    assert_eq!(body["images"], serde_json::json!(hashes));
 }

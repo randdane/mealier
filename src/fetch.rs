@@ -40,7 +40,7 @@ pub fn is_public(ip: IpAddr) -> bool {
             if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
                 return public_v4(Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8));
             }
-            !(a.is_loopback() || a.is_unspecified() || a.is_multicast() || a.is_unique_local() || a.is_unicast_link_local())
+            !(a.is_loopback() || a.is_unspecified() || a.is_multicast() || a.is_unique_local() || a.is_unicast_link_local() || (s[0] & 0xffc0) == 0xfec0) // fec0::/10, deprecated site-local
         }
     }
 }

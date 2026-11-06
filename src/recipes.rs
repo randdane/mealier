@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, Sqlite, Transaction};
 use utoipa::ToSchema;
 
+use crate::images::Processed;
 use crate::{Db, Error, Result, Scope};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -67,6 +68,13 @@ pub struct Content {
     pub tools: Vec<String>,
     pub ingredients: Vec<Ingredient>,
     pub steps: Vec<String>,
+    /// Hashes of the recipe's images when this was written, in order. Frozen with the rest, so
+    /// replacing an image never rewrites history.
+    #[serde(default)]
+    pub images: Vec<String>,
+    /// Hashes of the recipe's assets (non-image attachments). Nothing fills it yet.
+    #[serde(default)]
+    pub assets: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
@@ -100,25 +108,36 @@ pub struct Snapshot {
     pub content: Content,
 }
 
-async fn build_content(tx: &mut Transaction<'_, Sqlite>, group_id: i64, input: RecipeInput) -> Result<Content> {
+/// The one rule for a quantity range, wherever one is stored (recipe lines, batch lines, shopping items).
+/// A lone minimum is not a range: the maximum is filled from it. A maximum alone, a negative or
+/// non-finite number, or a minimum above the maximum is refused.
+pub(crate) fn range(min: Option<f64>, max: Option<f64>) -> Result<(Option<f64>, Option<f64>)> {
+    if [min, max].into_iter().flatten().any(|q| !q.is_finite()) {
+        return Err(Error::Validation("quantities must be finite numbers".into()));
+    }
+    let max = match (min, max) {
+        (Some(min), None) => Some(min),
+        (None, Some(_)) => return Err(Error::Validation("a maximum quantity needs a minimum".into())),
+        (_, max) => max,
+    };
+    if let (Some(min), Some(max)) = (min, max) {
+        if min < 0.0 || max < 0.0 {
+            return Err(Error::Validation("quantities must not be negative".into()));
+        }
+        if min > max {
+            return Err(Error::Validation("the minimum quantity must not exceed the maximum".into()));
+        }
+    }
+    Ok((min, max))
+}
+
+async fn build_content(tx: &mut Transaction<'_, Sqlite>, group_id: i64, input: RecipeInput, images: Vec<String>) -> Result<Content> {
     if input.name.trim().is_empty() {
         return Err(Error::Validation("recipe name must not be empty".into()));
     }
     let mut ingredients = Vec::new();
     for mut i in input.ingredients {
-        match (i.qty_min, i.qty_max) {
-            (Some(min), None) => i.qty_max = Some(min),
-            (None, Some(_)) => return Err(Error::Validation("qty_max needs qty_min".into())),
-            _ => {}
-        }
-        if let (Some(min), Some(max)) = (i.qty_min, i.qty_max) {
-            if min < 0.0 || max < 0.0 {
-                return Err(Error::Validation("quantities must not be negative".into()));
-            }
-            if min > max {
-                return Err(Error::Validation("qty_min must not exceed qty_max".into()));
-            }
-        }
+        (i.qty_min, i.qty_max) = range(i.qty_min, i.qty_max)?;
         let unit = match i.unit_id {
             Some(id) => {
                 let row = sqlx::query("SELECT name, factor FROM units WHERE id = ? AND group_id = ?")
@@ -154,6 +173,12 @@ async fn build_content(tx: &mut Transaction<'_, Sqlite>, group_id: i64, input: R
             original_text: i.original_text,
         });
     }
+    // The group's vocabularies learn every name a recipe uses.
+    for (table, names) in [("tags", &input.tags), ("categories", &input.categories), ("tools", &input.tools), ("cookbooks", &input.cookbooks)] {
+        for name in names {
+            sqlx::query(&format!("INSERT OR IGNORE INTO {table} (group_id, name) VALUES (?, ?)")).bind(group_id).bind(name).execute(&mut **tx).await?;
+        }
+    }
     Ok(Content {
         name: input.name,
         description: input.description,
@@ -165,6 +190,8 @@ async fn build_content(tx: &mut Transaction<'_, Sqlite>, group_id: i64, input: R
         tools: input.tools,
         ingredients,
         steps: input.steps,
+        images,
+        assets: Vec::new(),
     })
 }
 
@@ -220,8 +247,9 @@ fn snapshot_from(row: &sqlx::sqlite::SqliteRow) -> Result<Snapshot> {
 }
 
 /// Creates a recipe and its first snapshot inside the caller's transaction.
-pub(crate) async fn insert_recipe(tx: &mut Transaction<'_, Sqlite>, group_id: i64, input: RecipeInput) -> Result<Recipe> {
-    let content = build_content(tx, group_id, input).await?;
+/// `images` are the hashes the first snapshot lists; the caller links them to the recipe.
+pub(crate) async fn insert_recipe(tx: &mut Transaction<'_, Sqlite>, group_id: i64, input: RecipeInput, images: Vec<String>) -> Result<Recipe> {
+    let content = build_content(tx, group_id, input, images).await?;
     let id = sqlx::query("INSERT INTO recipes (group_id, name) VALUES (?, ?)")
         .bind(group_id)
         .bind(&content.name)
@@ -230,6 +258,38 @@ pub(crate) async fn insert_recipe(tx: &mut Transaction<'_, Sqlite>, group_id: i6
         .last_insert_rowid();
     let current_snapshot_id = write_snapshot(tx, id, &content).await?;
     Ok(Recipe { id, archived: false, current_snapshot_id, content })
+}
+
+/// Files, records and links an image for a recipe. The file goes down before the commit: it is content-addressed, so one left by a failed commit is harmless.
+async fn link_image(tx: &mut Transaction<'_, Sqlite>, recipe_id: i64, photo: &Processed, dir: &std::path::Path) -> Result<()> {
+    photo.write(dir)?;
+    photo.record(tx).await?;
+    sqlx::query("INSERT OR IGNORE INTO recipe_images (recipe_id, hash) VALUES (?, ?)").bind(recipe_id).bind(&photo.hash).execute(&mut **tx).await?;
+    Ok(())
+}
+
+impl From<Content> for RecipeInput {
+    /// What an edit that changes nothing would send. Unit and food names are looked up again on save.
+    fn from(c: Content) -> RecipeInput {
+        RecipeInput {
+            name: c.name,
+            description: c.description,
+            source_url: c.source_url,
+            nutrition: c.nutrition,
+            tags: c.tags,
+            categories: c.categories,
+            cookbooks: c.cookbooks,
+            tools: c.tools,
+            ingredients: c.ingredients.iter().map(IngredientInput::from).collect(),
+            steps: c.steps,
+        }
+    }
+}
+
+impl From<&Ingredient> for IngredientInput {
+    fn from(i: &Ingredient) -> IngredientInput {
+        IngredientInput { qty_min: i.qty_min, qty_max: i.qty_max, unit_id: i.unit_id, food_id: i.food_id, note: i.note.clone(), original_text: i.original_text.clone() }
+    }
 }
 
 impl Db {
@@ -280,8 +340,17 @@ impl Db {
     }
 
     pub async fn update_recipe(&self, sc: &Scope, id: i64, input: RecipeInput) -> Result<Recipe> {
+        self.update_recipe_with(sc, id, input, None).await
+    }
+
+    /// `update_recipe`, and optionally a new image (which replaces the recipe's image) in the same snapshot.
+    pub(crate) async fn update_recipe_with(&self, sc: &Scope, id: i64, input: RecipeInput, image: Option<(&Processed, &std::path::Path)>) -> Result<Recipe> {
         let mut tx = self.pool.begin().await?;
-        let content = build_content(&mut tx, sc.group_id, input).await?;
+        let images = match image {
+            Some((p, _)) => vec![p.hash.clone()],
+            None => sqlx::query_scalar("SELECT hash FROM recipe_images WHERE recipe_id = ? ORDER BY position, hash").bind(id).fetch_all(&mut *tx).await?,
+        };
+        let content = build_content(&mut tx, sc.group_id, input, images).await?;
         let archived = sqlx::query_scalar::<_, bool>("SELECT archived FROM recipes WHERE id = ? AND group_id = ?")
             .bind(id)
             .bind(sc.group_id)
@@ -289,8 +358,19 @@ impl Db {
             .await?
             .ok_or(Error::NotFound("recipe"))?;
         let current_snapshot_id = write_snapshot(&mut tx, id, &content).await?;
+        if let Some((photo, dir)) = image {
+            sqlx::query("DELETE FROM recipe_images WHERE recipe_id = ?").bind(id).execute(&mut *tx).await?;
+            link_image(&mut tx, id, photo, dir).await?;
+        }
         tx.commit().await?;
         Ok(Recipe { id, archived, current_snapshot_id, content })
+    }
+
+    /// Replaces the recipe's image. An edit like any other: it writes a snapshot, so the old one still lists the old image.
+    pub async fn set_recipe_image(&self, sc: &Scope, id: i64, images_dir: &std::path::Path, bytes: &[u8]) -> Result<Recipe> {
+        let photo = crate::images::prepare(bytes).await?;
+        let current = self.get_recipe(sc, id).await?.ok_or(Error::NotFound("recipe"))?;
+        self.update_recipe_with(sc, id, current.content.into(), Some((&photo, images_dir))).await
     }
 
     pub async fn archive_recipe(&self, sc: &Scope, id: i64) -> Result<()> {
@@ -332,8 +412,16 @@ impl Db {
     }
 
     pub async fn create_recipe(&self, sc: &Scope, input: RecipeInput) -> Result<Recipe> {
+        self.create_recipe_with(sc, input, None).await
+    }
+
+    /// `create_recipe`, with an image already in the first snapshot.
+    pub(crate) async fn create_recipe_with(&self, sc: &Scope, input: RecipeInput, image: Option<(&Processed, &std::path::Path)>) -> Result<Recipe> {
         let mut tx = self.pool.begin().await?;
-        let recipe = insert_recipe(&mut tx, sc.group_id, input).await?;
+        let recipe = insert_recipe(&mut tx, sc.group_id, input, image.iter().map(|(p, _)| p.hash.clone()).collect()).await?;
+        if let Some((photo, dir)) = image {
+            link_image(&mut tx, recipe.id, photo, dir).await?;
+        }
         tx.commit().await?;
         Ok(recipe)
     }

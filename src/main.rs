@@ -78,12 +78,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{report:#?}");
             return Ok(());
         }
-        Some(other) => return Err(format!("unknown command '{other}' (commands: hash-password, healthcheck, import-mealie <zip>; the server takes no arguments)").into()),
+        Some("export") => {
+            let out = std::env::args().nth(2).ok_or("usage: mealier export <out.zip>")?;
+            mealier::backup::export_dir(&data_dir()?, std::path::Path::new(&out)).await?;
+            println!("exported to {out}");
+            return Ok(());
+        }
+        Some("restore") => {
+            let zip = std::env::args().nth(2).ok_or("usage: mealier restore <in.zip> (stop the server first)")?;
+            let restored = mealier::backup::restore_offline(std::path::Path::new(&zip), &data_dir()?).await?;
+            match restored.previous {
+                Some(p) => println!("restored; the data it replaced is in {}", p.display()),
+                None => println!("restored"),
+            }
+            return Ok(());
+        }
+        Some(other) => return Err(format!("unknown command '{other}' (commands: hash-password, healthcheck, import-mealie <zip>, export <out.zip>, restore <in.zip>; the server takes no arguments)").into()),
         None => {}
     }
     let dir = data_dir()?;
     std::fs::create_dir_all(&dir)?;
-    let db = Db::open(&dir.join("mealier.db")).await?;
+    // Held until the process exits: `mealier restore` refuses to touch a directory a server is using.
+    let _lock = mealier::backup::lock_data_dir(&dir)?;
+    let db = Db::open(&dir.join(mealier::backup::DB_FILE)).await?;
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "9000".into());
     // A container needs 0.0.0.0 so Docker can forward to it; default stays loopback.
@@ -106,6 +123,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("mealier: no way to sign in is configured (set OIDC_CONFIGURATION_URL or MEALIER_ADMIN_PASSWORD_FILE)");
     }
     let state = api::AppState { db, images_dir: dir.join("images") };
-    axum::serve(listener, api::router_with_auth(state, import, auth)).with_graceful_shutdown(shutdown()).await?;
+    // A restore from the UI swaps the files under the open pool: after answering, the process exits and the container restarts it.
+    let restart = std::sync::Arc::new(mealier::backup::Restart::new());
+    let stop = {
+        let restart = restart.clone();
+        async move {
+            tokio::select! {
+                _ = shutdown() => {}
+                _ = restart.requested() => eprintln!("mealier: restore done, exiting so the container restarts"),
+            }
+        }
+    };
+    axum::serve(listener, api::router_with_restart(state, import, auth, restart)).with_graceful_shutdown(stop).await?;
     Ok(())
 }

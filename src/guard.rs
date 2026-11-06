@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header::{AUTHORIZATION, COOKIE, HOST, ORIGIN};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, Method, StatusCode, header};
+use axum::http::{HeaderMap, Method};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -126,6 +126,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
 pub(crate) struct Guard {
     pub db: Db,
     pub auth: Arc<Auth>,
+    pub restart: Arc<crate::backup::Restart>,
 }
 
 /// Reachable without a user. Whole path segments only: `/loginx` is not `/login`.
@@ -136,7 +137,7 @@ fn is_public(path: &str) -> bool {
 
 /// Belt over the router: the admin-only areas are refused here even if a handler forgets `Admin`.
 fn is_admin_area(path: &str) -> bool {
-    ["/api/webhooks", "/settings/webhooks", "/api/users", "/settings/users", "/api/llm", "/settings/llm", "/api/groups", "/api/households", "/api/default-household", "/settings/households"].iter().any(|p| path == *p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
+    ["/api/webhooks", "/settings/webhooks", "/api/users", "/settings/users", "/api/llm", "/settings/llm", "/api/groups", "/api/households", "/api/default-household", "/settings/households", "/api/export", "/api/restore", "/settings/backup"].iter().any(|p| path == *p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
 }
 
 pub(crate) fn session_cookie_value(headers: &HeaderMap) -> Option<&str> {
@@ -180,18 +181,13 @@ fn csrf_refused(cfg: &AuthConfig, h: &HeaderMap) -> bool {
     }
 }
 
-fn refuse(e: Error, html_redirect: bool) -> Response {
-    if html_redirect {
-        (StatusCode::SEE_OTHER, [(header::LOCATION, "/login")]).into_response()
-    } else {
-        e.into_response()
-    }
-}
-
 /// The authentication middleware; wraps every route.
 pub(crate) async fn guard(State(g): State<Guard>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_owned();
-    let api = path.starts_with("/api/");
+    // A restore has swapped the files under this process; anything it did now would be lost with it.
+    if g.restart.is_requested() && path != "/healthz" {
+        return Error::Unavailable("mealier is restarting after a restore; try again in a few seconds".into()).into_response();
+    }
     let state_changing = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
     let authz = req.headers().get(AUTHORIZATION).cloned();
 
@@ -216,7 +212,7 @@ pub(crate) async fn guard(State(g): State<Guard>, mut req: Request, next: Next) 
     };
     let user = match found {
         Ok(Some(u)) => u,
-        Ok(None) => return refuse(Error::Unauthorized, !api),
+        Ok(None) => return Error::Unauthorized.into_response(),
         Err(e) => return e.into_response(),
     };
     if user.role != "admin" && is_admin_area(&path) {

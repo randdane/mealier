@@ -47,3 +47,29 @@ pub async fn tenants(db: &Db) -> Tenants {
     let at = |g: i64, h: i64| Scope { user_id: 0, group_id: g, household_id: h, admin: false };
     Tenants { a: at(one.id, alpha.id), b: at(one.id, beta.id), c: at(two.id, gamma.id) }
 }
+
+/// A real, tiny, solid-colour image: the store decodes what it is given, so fake bytes no longer pass.
+/// `seed` picks the colour, so two seeds are two different files.
+pub fn image_bytes(format: image::ImageFormat, w: u32, h: u32, seed: u8) -> Vec<u8> {
+    let img = image::RgbImage::from_pixel(w, h, image::Rgb([seed, 40, 90]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, format).unwrap();
+    out.into_inner()
+}
+
+pub fn png(w: u32, h: u32, seed: u8) -> Vec<u8> {
+    image_bytes(image::ImageFormat::Png, w, h, seed)
+}
+
+pub fn jpeg(w: u32, h: u32, seed: u8) -> Vec<u8> {
+    image_bytes(image::ImageFormat::Jpeg, w, h, seed)
+}
+
+pub fn webp(w: u32, h: u32, seed: u8) -> Vec<u8> {
+    image_bytes(image::ImageFormat::WebP, w, h, seed)
+}
+
+/// Width and height of an image file's bytes.
+pub fn dims(bytes: &[u8]) -> (u32, u32) {
+    image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().unwrap().into_dimensions().unwrap()
+}

@@ -1,6 +1,5 @@
 use axum::extract::{DefaultBodyLimit, Multipart, Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::extract::Path;
 use axum::{Extension, Json, Router};
@@ -28,6 +27,7 @@ pub struct ErrorBody {
     get_lists, create_list, get_list, add_list_item, put_item, delete_item, list_add_recipe, list_add_batch,
     list_webhooks, create_webhook, get_webhook, put_webhook, delete_webhook, test_webhook,
     get_llm, test_llm, nutrition_estimate,
+    crate::backup::download, crate::backup::restore_api,
     crate::login::me, crate::login::list_users, crate::login::disable_user, crate::login::enable_user,
     crate::households::list_groups, crate::households::create_group, crate::households::list_households, crate::households::create_household,
     crate::households::get_default, crate::households::put_default, crate::households::move_user
@@ -47,23 +47,6 @@ impl utoipa::Modify for BearerScheme {
 
 async fn openapi() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
-}
-
-impl IntoResponse for Error {
-    fn into_response(self) -> Response {
-        let (status, msg) = match &self {
-            Error::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
-            Error::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
-            Error::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
-            Error::Forbidden(_) => (StatusCode::FORBIDDEN, self.to_string()),
-            Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
-            other => {
-                eprintln!("mealier: {other}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
-            }
-        };
-        (status, Json(serde_json::json!({ "error": msg }))).into_response()
-    }
 }
 
 #[utoipa::path(
@@ -255,20 +238,9 @@ async fn finish_batch(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> R
     )
 )]
 async fn add_photo(sc: Scope, State(s): State<AppState>, Path(id): Path<i64>, form: Multipart) -> Result<(StatusCode, Json<BatchDetail>), Error> {
-    let bytes = read_photo(form).await?;
+    let bytes = crate::images::read_photo(form).await?;
     s.db.add_batch_photo(&sc, id, &s.images_dir, &bytes).await?;
     Ok((StatusCode::CREATED, Json(s.db.get_batch(&sc, id).await?)))
-}
-
-/// The bytes of the multipart field `photo`. Shared with the HTML upload form.
-pub(crate) async fn read_photo(mut form: Multipart) -> Result<axum::body::Bytes, Error> {
-    let bad = |e: axum::extract::multipart::MultipartError| Error::Validation(format!("bad upload: {e}"));
-    while let Some(field) = form.next_field().await.map_err(bad)? {
-        if field.name() == Some("photo") {
-            return field.bytes().await.map_err(bad);
-        }
-    }
-    Err(Error::Validation("form field `photo` is missing".into()))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -587,7 +559,12 @@ pub fn router_with(state: AppState, import: ImportService) -> Router {
 
 /// `router_with` and an explicit auth configuration (`AuthConfig::from_env()` in the binary).
 pub fn router_with_auth(state: AppState, import: ImportService, auth: crate::AuthConfig) -> Router {
-    let guard = crate::Guard { db: state.db.clone(), auth: Arc::new(crate::Auth::new(auth)) };
+    router_with_restart(state, import, auth, Arc::new(crate::backup::Restart::new()))
+}
+
+/// `router_with_auth`, and the signal a restore uses to ask the process to exit (`main` waits on it).
+pub fn router_with_restart(state: AppState, import: ImportService, auth: crate::AuthConfig, restart: Arc<crate::backup::Restart>) -> Router {
+    let guard = crate::Guard { db: state.db.clone(), auth: Arc::new(crate::Auth::new(auth)), restart: restart.clone() };
     Router::new()
         .route("/api/recipes/import", post(import_url))
         .route("/api/recipes", post(create).get(list))
@@ -624,8 +601,11 @@ pub fn router_with_auth(state: AppState, import: ImportService, auth: crate::Aut
         .merge(crate::web::routes())
         .merge(crate::login::routes())
         .merge(crate::households::routes())
+        .merge(crate::backup::routes())
+        .layer(Extension(restart))
         .layer(Extension(Arc::new(import)))
         .layer(Extension(guard.auth.clone()))
         .layer(axum::middleware::from_fn_with_state(guard, crate::guard::guard))
+        .layer(axum::middleware::from_fn(crate::errors::pages))
         .with_state(state)
 }

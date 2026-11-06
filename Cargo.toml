@@ -24,9 +24,27 @@ jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_
 argon2 = "0.6.0"
 getrandom = "0.4.3"
 base64 = "0.22"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
 
 [dev-dependencies]
 http-body-util = "0.1.5"
 jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 tempfile = "3"
 tower = { version = "0.5.3", features = ["util"] }
+
+# Decoding and resizing photos is far too slow unoptimised for the tests to be pleasant.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.moxcms]
+opt-level = 3

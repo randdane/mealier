@@ -2,6 +2,7 @@
 {% block title %}{{ name }} - mealier{% endblock %}
 {% block content %}
 <h1>{{ name }}</h1>
+{% if !image.is_empty() %}<img src="/images/{{ image }}" alt="" class="hero">{% endif %}
 {% if !description.is_empty() %}<p>{{ description }}</p>{% endif %}
 
 <p><a href="/recipes/{{ id }}/cook">Cook</a> · <a href="/recipes/{{ id }}/edit">Edit</a> · <a href="/recipes/{{ id }}/ingredients/review">Review ingredients</a></p>

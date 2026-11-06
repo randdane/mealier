@@ -104,7 +104,7 @@ async fn pages() -> String {
         .route("/r", get(|| async { PAGE }))
         .route("/long", get(move || { let l = long.clone(); async move { l } }))
         .route("/ld", get(|| async { LD }))
-        .route("/img.jpg", get(|| async { vec![0xffu8, 0xd8, 0xff, 0xe0, 1, 2, 3] }));
+        .route("/img.jpg", get(|| async { common::jpeg(16, 16, 3) }));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });

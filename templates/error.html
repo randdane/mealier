@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}{{ status }} {{ reason }} - mealier{% endblock %}
+{% block content %}
+<h1>{{ status }} {{ reason }}</h1>
+<p>{{ message }}</p>
+<p><a href="/" onclick="if (history.length > 1) { history.back(); return false; }">Back</a></p>
+{% endblock %}

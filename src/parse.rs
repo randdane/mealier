@@ -319,3 +319,17 @@ pub async fn fill_unparsed(llm: &crate::Llm, lines: &mut [crate::IngredientInput
     filled.sort_unstable();
     filled
 }
+
+/// Parsed form of a line: what `parse_line` found, or just the text when it found nothing.
+pub(crate) fn parsed_input(text: &str, units: &[crate::Unit], foods: &[crate::Food]) -> crate::IngredientInput {
+    let p = parse_line(text, units, foods);
+    let keep = p.confidence != crate::Confidence::None;
+    crate::IngredientInput {
+        qty_min: p.qty_min.filter(|_| keep),
+        qty_max: p.qty_max.filter(|_| keep),
+        unit_id: p.unit_id,
+        food_id: p.food_id,
+        note: p.note,
+        original_text: p.original_text,
+    }
+}

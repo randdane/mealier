@@ -3,9 +3,12 @@ use std::path::Path;
 pub mod api;
 mod auth;
 mod guard;
+mod errors;
 mod households;
+mod images;
 mod login;
 mod oidc;
+pub mod backup;
 mod batches;
 pub mod fetch;
 mod import;
@@ -49,6 +52,11 @@ pub enum Error {
     Forbidden(String),
     #[error("{0}")]
     TooMany(String),
+    #[error("{0}")]
+    Unavailable(String),
+    /// A failure that is not I/O and not the caller's doing: a task that panicked, a template that did not render.
+    #[error("{0}")]
+    Internal(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
@@ -73,6 +81,8 @@ impl Db {
             .filename(path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
+            // sqlx's default too; spelled out because a writer waiting on another is what this buys.
+            .busy_timeout(std::time::Duration::from_secs(5))
             .foreign_keys(true);
         Self::connect(opts, 4).await
     }
