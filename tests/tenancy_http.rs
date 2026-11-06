@@ -247,6 +247,7 @@ fn api_routes() -> Vec<Route> {
         r("PUT", "/api/meal-plan/{entry}", Household, |_| Req::Json(json!({"date": "2026-12-02", "slot": "lunch", "title": "x"})), 200),
         r("DELETE", "/api/meal-plan/{entry}", Household, none, 204),
         r("GET", "/api/shopping-lists/{list}", Household, none, 200),
+        r("DELETE", "/api/shopping-lists/{list}", Household, none, 204),
         r("POST", "/api/shopping-lists/{list}/items", Household, |_| Req::Json(json!({"note": "eggs"})), 201),
         r("PUT", "/api/shopping-list-items/{item}", Household, |_| Req::Json(json!({"note": "x"})), 200),
         r("DELETE", "/api/shopping-list-items/{item}", Household, none, 204),
@@ -443,7 +444,7 @@ fn html_routes_are_all_listed() {
         }
     }
     // admin-only webhook pages, and /images/{name} (own test)
-    let elsewhere: BTreeSet<String> = ["/settings/webhooks/{id}/delete", "/settings/webhooks/{id}/toggle", "/settings/webhooks/{id}/test", "/images/{id}"].map(String::from).into();
+    let elsewhere: BTreeSet<String> = ["/settings/webhooks/{id}/delete", "/settings/webhooks/{id}/toggle", "/settings/webhooks/{id}/test", "/settings/webhooks/{id}/edit", "/images/{id}"].map(String::from).into();
     let listed: BTreeSet<String> = html_routes().iter().map(|r| normalised(r.path)).collect();
     let expected: BTreeSet<String> = in_source.difference(&elsewhere).cloned().collect();
     assert_eq!(listed, expected, "src/web/ has a route with an id that the table does not cover (or the table lists one that is gone)");

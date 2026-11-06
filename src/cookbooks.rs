@@ -111,7 +111,9 @@ impl Db {
             .await?
             .last_insert_rowid();
         tx.commit().await?;
-        self.cookbook(sc, id).await
+        let book = self.cookbook(sc, id).await?;
+        self.changed("cookbook_created", sc, id, book.name.clone(), serde_json::json!({}));
+        Ok(book)
     }
 
     pub async fn update_cookbook(&self, sc: &Scope, id: i64, input: CookbookInput) -> Result<Cookbook> {
@@ -134,14 +136,15 @@ impl Db {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        self.cookbook(sc, id).await
+        let book = self.cookbook(sc, id).await?;
+        self.changed("cookbook_updated", sc, id, book.name.clone(), serde_json::json!({}));
+        Ok(book)
     }
 
     pub async fn delete_cookbook(&self, sc: &Scope, id: i64) -> Result<()> {
-        let n = sqlx::query("DELETE FROM cookbooks WHERE id = ? AND group_id = ?").bind(id).bind(sc.group_id).execute(&self.pool).await?.rows_affected();
-        if n == 0 {
-            return Err(Error::NotFound("cookbook"));
-        }
+        let name = self.cookbook(sc, id).await?.name;
+        sqlx::query("DELETE FROM cookbooks WHERE id = ? AND group_id = ?").bind(id).bind(sc.group_id).execute(&self.pool).await?;
+        self.changed("cookbook_deleted", sc, id, name, serde_json::json!({}));
         Ok(())
     }
 

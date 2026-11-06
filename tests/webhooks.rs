@@ -12,6 +12,9 @@ fn input(name: &str) -> WebhookInput {
         events: vec!["batch_logged".into()],
         ntfy_tags: String::new(),
         enabled: true,
+        group_id: None,
+        household_id: None,
+        time_of_day: None,
     }
 }
 

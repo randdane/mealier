@@ -249,7 +249,7 @@ impl Db {
         if n == 0 {
             return Err(Error::NotFound("shopping list"));
         }
-        Ok(())
+        self.list_updated(sc, list_id).await
     }
 
     /// The substitutes of each food in `ids`, by food id (for a page that shows "or ..." beside a line).

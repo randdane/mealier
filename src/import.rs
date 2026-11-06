@@ -48,6 +48,9 @@ pub struct ImportReport {
     pub foods_on_hand: usize,
     pub tools_owned: usize,
     pub share_links: usize,
+    /// Notifiers that became JSON or ntfy webhooks, and scheduled webhooks (imported disabled).
+    pub webhooks: usize,
+    pub scheduled_webhooks: usize,
     /// Records the importer left out, one line each.
     pub skipped: Vec<String>,
 }
@@ -190,6 +193,7 @@ pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Res
     import_rules(&mut tx, &b, &mut report).await?;
     import_shopping(&mut tx, &b, &mut report).await?;
     import_household_features(&mut tx, &b, &mut report).await?;
+    import_webhooks(&mut tx, &b, &mut report).await?;
     let files = import_images(&mut tx, &images, &mut report).await?;
     if let Some(g) = home {
         retire_home(&mut tx, g).await?;
@@ -1077,4 +1081,157 @@ async fn import_images(tx: &mut Tx<'_>, images: &HashMap<String, Processed>, rep
     }
     report.images += files.len();
     Ok(files.into_values().cloned().collect())
+}
+
+/// An Apprise notification URL as a mealier webhook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Converted {
+    /// `json` or `ntfy`.
+    pub kind: &'static str,
+    pub url: String,
+    /// The URL had a query string (Apprise options such as a priority or headers); it was not carried over.
+    pub dropped_query: bool,
+}
+
+/// Converts an Apprise `ntfy://`, `ntfys://`, `json://` or `jsons://` URL. The error says why, in words that
+/// never contain any part of the URL but its scheme: these URLs carry tokens.
+pub fn apprise_to_webhook(apprise: &str) -> std::result::Result<Converted, String> {
+    let bad = || "not a URL".to_string();
+    let (scheme, rest) = apprise.trim().split_once("://").ok_or_else(bad)?;
+    if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) {
+        return Err(bad());
+    }
+    let scheme = scheme.to_ascii_lowercase();
+    let (kind, secure) = match scheme.as_str() {
+        "ntfy" => ("ntfy", false),
+        "ntfys" => ("ntfy", true),
+        "json" => ("json", false),
+        "jsons" => ("json", true),
+        other => return Err(format!("the scheme {other} is not supported")),
+    };
+    let rest = rest.split('#').next().unwrap_or_default();
+    let (main, query) = rest.split_once('?').unwrap_or((rest, ""));
+    if main.is_empty() {
+        return Err("it has no host".into());
+    }
+    // `ntfy://topic`: Apprise's hosted service.
+    if kind == "ntfy" && !main.contains(['/', '@', ':']) {
+        return Ok(Converted { kind, url: format!("https://ntfy.sh/{main}"), dropped_query: !query.is_empty() });
+    }
+    let mut u = url::Url::parse(&format!("{}://{main}", if secure { "https" } else { "http" })).map_err(|_| "its address is not usable".to_string())?;
+    if u.host().is_none() {
+        return Err("it has no host".into());
+    }
+    if kind == "ntfy" {
+        if !u.username().is_empty() && u.password().is_none() {
+            return Err("an ntfy user without a password (a token?) is not supported".into());
+        }
+        let topics: Vec<&str> = u.path_segments().map(|p| p.filter(|s| !s.is_empty()).collect()).unwrap_or_default();
+        match topics.as_slice() {
+            [] => return Err("it names no ntfy topic".into()),
+            [one] => {
+                let path = format!("/{one}");
+                u.set_path(&path);
+            }
+            _ => return Err("several ntfy topics in one URL are not supported".into()),
+        }
+    }
+    u.set_query(None);
+    u.set_fragment(None);
+    Ok(Converted { kind, url: u.to_string(), dropped_query: !query.is_empty() })
+}
+
+/// Mealie's notifier option fields that mealier has an event for; each field is also the event's name.
+/// Every other option (user_signup, data_*, mealplan_entry_updated/deleted, tag_*, category_*, label_*,
+/// test_message, webhook_task) has none.
+const MEALIE_EVENT_OPTIONS: [&str; 10] = [
+    "recipe_created",
+    "recipe_updated",
+    "recipe_deleted",
+    "mealplan_entry_created",
+    "shopping_list_created",
+    "shopping_list_updated",
+    "shopping_list_deleted",
+    "cookbook_created",
+    "cookbook_updated",
+    "cookbook_deleted",
+];
+
+/// `HH:MM` from the front of a time of day such as `07:30:00`, `07:30:00.123456` or `07:30:00+00:00`.
+fn time_of_day(t: &str) -> Option<String> {
+    let hhmm = t.get(..5)?;
+    crate::webhooks::parse_hhmm(hhmm).map(|_| hhmm.to_string())
+}
+
+/// Notifiers (`group_events_notifiers` and their options) become JSON or ntfy webhooks, filtered to their
+/// group; `webhook_urls` become scheduled webhooks, disabled. Apprise URLs hold tokens, so nothing here
+/// writes one into the report: lines name the notifier and, for an unsupported URL, only its scheme.
+async fn import_webhooks(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
+    let options: HashMap<&str, &MRow> = b.rows("group_events_notifier_options").into_iter().filter_map(|r| Some((s(r, "event_notifier_id")?, r))).collect();
+    for n in b.rows("group_events_notifiers") {
+        let name = s(n, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("unnamed");
+        let label = format!("notifier {name:?}");
+        let row = options.get(id(n, "id")?);
+        let events: Vec<&str> = crate::EVENTS.iter().copied().filter(|e| MEALIE_EVENT_OPTIONS.contains(e) && row.is_some_and(|r| flag(r, e))).collect();
+        let others: Vec<&str> = row.map(|r| r.iter().filter(|(k, v)| v.as_bool() == Some(true) && !MEALIE_EVENT_OPTIONS.contains(&k.as_str())).map(|(k, _)| k.as_str()).collect()).unwrap_or_default();
+        let others = if others.is_empty() { String::new() } else { format!(" (options with no mealier event: {})", others.join(", ")) };
+        if events.is_empty() {
+            report.skipped.push(format!("{label}: no event mealier has is selected{others}; not imported"));
+            continue;
+        }
+        if !others.is_empty() {
+            report.skipped.push(format!("{label}: subscribed to the events mealier has{others}; the others are not sent"));
+        }
+        let c = match apprise_to_webhook(s(n, "apprise_url").unwrap_or_default()) {
+            Ok(c) => c,
+            Err(why) => {
+                report.skipped.push(format!("{label}: {why}; not imported"));
+                continue;
+            }
+        };
+        if c.dropped_query {
+            report.skipped.push(format!("{label}: the query part of its address was not carried over"));
+        }
+        let group = local_opt(tx, "group", s(n, "group_id")).await?;
+        sqlx::query("INSERT INTO webhooks (name, kind, url, events, enabled, group_id) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(name)
+            .bind(c.kind)
+            .bind(c.url)
+            .bind(serde_json::to_string(&events)?)
+            .bind(n.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+            .bind(group)
+            .execute(&mut **tx)
+            .await?;
+        report.webhooks += 1;
+    }
+
+    for w in b.rows("webhook_urls") {
+        let name = s(w, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("unnamed");
+        let label = format!("scheduled webhook {name:?}");
+        let group = local(tx, "group", id(w, "group_id")?).await?;
+        let household = match local_opt(tx, "household", s(w, "household_id")).await? {
+            Some(h) => {
+                same_group(tx, "households", h, group, "scheduled webhook's household").await?;
+                h
+            }
+            None => household_for(tx, None, group).await?,
+        };
+        let url = s(w, "url").unwrap_or_default().trim();
+        if !url::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some()) {
+            let scheme = url.split_once("://").map(|(sc, _)| sc).filter(|sc| !sc.is_empty() && sc.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)));
+            report.skipped.push(format!("{label}: its address is {}, not an http or https URL; not imported", scheme.map_or("not a URL".to_string(), |sc| format!("a {} URL", sc.to_ascii_lowercase()))));
+            continue;
+        }
+        // `scheduled_time` is the column Mealie reads; `time` is a legacy string it no longer uses.
+        let Some(at) = s(w, "scheduled_time").and_then(time_of_day).or_else(|| s(w, "time").and_then(time_of_day)) else {
+            report.skipped.push(format!("{label}: it has no usable time of day; not imported"));
+            continue;
+        };
+        sqlx::query("INSERT INTO webhooks (name, kind, url, events, enabled, group_id, household_id, time_of_day) VALUES (?, 'scheduled', ?, '[]', 0, ?, ?, ?)").bind(name).bind(url).bind(group).bind(household).bind(at).execute(&mut **tx).await?;
+        report.scheduled_webhooks += 1;
+    }
+    if report.scheduled_webhooks > 0 {
+        report.skipped.push("scheduled webhooks: Mealie stores their times in UTC; they were kept as written and are read in the instance timezone (TZ, UTC if unset). They are disabled".into());
+    }
+    Ok(())
 }

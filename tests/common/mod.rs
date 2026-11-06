@@ -73,3 +73,37 @@ pub fn webp(w: u32, h: u32, seed: u8) -> Vec<u8> {
 pub fn dims(bytes: &[u8]) -> (u32, u32) {
     image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().unwrap().into_dimensions().unwrap()
 }
+
+/// One request a test receiver got.
+#[derive(Clone)]
+pub struct Hit {
+    pub path: String,
+    pub headers: axum::http::HeaderMap,
+    pub body: String,
+}
+
+/// A receiver on 127.0.0.1 that records every POST and answers `status`. Returns its base URL.
+pub async fn receiver(status: u16) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Hit>>>) {
+    use axum::extract::State;
+    type Hits = std::sync::Arc<std::sync::Mutex<Vec<Hit>>>;
+    async fn h(State((hits, status)): State<(Hits, u16)>, uri: axum::http::Uri, headers: axum::http::HeaderMap, body: String) -> axum::http::StatusCode {
+        hits.lock().unwrap().push(Hit { path: uri.path().into(), headers, body });
+        axum::http::StatusCode::from_u16(status).unwrap()
+    }
+    let hits: Hits = Default::default();
+    let app = axum::Router::new().route("/{*p}", axum::routing::post(h)).with_state((hits.clone(), status));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (url, hits)
+}
+
+/// Waits (up to 3 s) for `n` requests, then a beat more so extras would show.
+pub async fn hits(h: &std::sync::Arc<std::sync::Mutex<Vec<Hit>>>, n: usize) -> Vec<Hit> {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while h.lock().unwrap().len() < n && std::time::Instant::now() < end {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    h.lock().unwrap().clone()
+}

@@ -77,7 +77,13 @@ impl Db {
             .execute(&self.pool)
             .await?
             .last_insert_rowid();
-        self.entry(sc, id).await
+        let e = self.entry(sc, id).await?;
+        let name = match (e.title.trim(), e.recipe_id) {
+            ("", Some(r)) => self.get_recipe(sc, r).await?.map(|r| r.content.name).unwrap_or_default(),
+            (t, _) => t.to_string(),
+        };
+        self.changed("mealplan_entry_created", sc, id, name, serde_json::json!({"date": e.date, "slot": e.slot, "recipe_id": e.recipe_id}));
+        Ok(e)
     }
 
     pub async fn update_entry(&self, sc: &Scope, id: i64, input: EntryInput) -> Result<MealPlanEntry> {
@@ -128,13 +134,33 @@ impl Db {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        self.changed("shopping_list_created", sc, id, name, serde_json::json!({}));
         Ok(ShoppingListSummary { id, name: name.into() })
+    }
+
+    /// Tells the webhooks a list's contents changed (call after the commit).
+    pub(crate) async fn list_updated(&self, sc: &Scope, list_id: i64) -> Result<()> {
+        let name: String = sqlx::query_scalar("SELECT name FROM shopping_lists WHERE id = ?").bind(list_id).fetch_one(&self.pool).await?;
+        self.changed("shopping_list_updated", sc, list_id, name, serde_json::json!({}));
+        Ok(())
+    }
+
+    /// The list and its items.
+    pub async fn delete_list(&self, sc: &Scope, id: i64) -> Result<()> {
+        let list = self.shopping_list(sc, id).await?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM shopping_list_items WHERE list_id = ?").bind(id).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM shopping_lists WHERE id = ? AND household_id = ?").bind(id).bind(sc.household_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        self.changed("shopping_list_deleted", sc, id, list.name, serde_json::json!({}));
+        Ok(())
     }
 
     pub async fn add_item(&self, sc: &Scope, list_id: i64, input: ItemInput) -> Result<ShoppingItem> {
         let line = check_item(self, sc, input).await?;
         self.list_exists(sc, list_id).await?;
         let id = insert_item(&mut *self.pool.acquire().await?, list_id, &line, None).await?;
+        self.list_updated(sc, list_id).await?;
         self.item(sc, id).await
     }
 
@@ -154,6 +180,7 @@ impl Db {
             .bind(sc.household_id)
             .execute(&self.pool)
             .await?;
+        self.list_updated(sc, self.item_list_id(sc, id).await?).await?;
         self.item(sc, id).await
     }
 
@@ -162,15 +189,16 @@ impl Db {
         if n == 0 {
             return Err(Error::NotFound("shopping list item"));
         }
-        Ok(())
+        self.list_updated(sc, self.item_list_id(sc, id).await?).await
     }
 
     pub async fn delete_item(&self, sc: &Scope, id: i64) -> Result<()> {
+        let list_id = self.item_list_id(sc, id).await?;
         let n = sqlx::query("DELETE FROM shopping_list_items WHERE id = ? AND list_id IN (SELECT id FROM shopping_lists WHERE household_id = ?)").bind(id).bind(sc.household_id).execute(&self.pool).await?.rows_affected();
         if n == 0 {
             return Err(Error::NotFound("shopping list item"));
         }
-        Ok(())
+        self.list_updated(sc, list_id).await
     }
 
     pub async fn add_recipe_to_list(&self, sc: &Scope, list_id: i64, recipe_id: i64, scale: f64) -> Result<ShoppingList> {
@@ -235,6 +263,7 @@ impl Db {
             }
         }
         tx.commit().await?;
+        self.list_updated(sc, list_id).await?;
         self.shopping_list(sc, list_id).await
     }
 

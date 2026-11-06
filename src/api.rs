@@ -24,7 +24,7 @@ pub struct ErrorBody {
     create, list, get_one, update, archive, snapshots, get_snapshot,
     start_batch, list_batches, get_batch, put_batch, add_line, finish_batch, add_photo, parse, import_url,
     get_plan, add_plan_entry, put_plan_entry, delete_plan_entry,
-    get_lists, create_list, get_list, list_labels, create_label, put_label, delete_label, put_food_label, put_section_order, add_list_item, put_item, delete_item, list_add_recipe, list_add_batch,
+    get_lists, create_list, get_list, delete_list, list_labels, create_label, put_label, delete_label, put_food_label, put_section_order, add_list_item, put_item, delete_item, list_add_recipe, list_add_batch,
     list_webhooks, create_webhook, get_webhook, put_webhook, delete_webhook, test_webhook,
     get_llm, test_llm, nutrition_estimate,
     crate::backup::download, crate::backup::restore_api,
@@ -363,6 +363,15 @@ async fn create_list(sc: Scope, State(db): State<Db>, Json(l): Json<NewList>) ->
 }
 
 #[utoipa::path(
+    delete, path = "/api/shopping-lists/{id}", params(("id" = i64, Path, description = "List id")),
+    responses((status = 204, description = "The list and its items were deleted"), (status = 404, description = "No such list", body = ErrorBody))
+)]
+async fn delete_list(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
+    db.delete_list(&sc, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
     get, path = "/api/shopping-lists/{id}", params(("id" = i64, Path, description = "List id")),
     responses((status = 200, description = "The list and its items", body = ShoppingList), (status = 404, description = "No such list", body = ErrorBody))
 )]
@@ -667,7 +676,7 @@ pub fn router_with_restart(state: AppState, import: ImportService, auth: crate::
         .route("/api/meal-plan", get(get_plan).post(add_plan_entry))
         .route("/api/meal-plan/{id}", put(put_plan_entry).delete(delete_plan_entry))
         .route("/api/shopping-lists", get(get_lists).post(create_list))
-        .route("/api/shopping-lists/{id}", get(get_list))
+        .route("/api/shopping-lists/{id}", get(get_list).delete(delete_list))
         .route("/api/shopping-lists/{id}/section-order", put(put_section_order))
         .route("/api/labels", get(list_labels).post(create_label))
         .route("/api/labels/{id}", put(put_label).delete(delete_label))

@@ -4,28 +4,44 @@
 <h1>Webhooks</h1>
 {% if !msg.is_empty() %}<p role="status">{{ msg }}</p>{% endif %}
 <ul>
-{% for h in hooks %}
+{% for r in hooks %}
   <li>
-    <strong>{{ h.name }}</strong> <span class="badge">{{ h.kind }}</span> {{ h.url }}
-    <small>{{ h.events.join(", ") }}{% if !h.enabled %} (disabled){% endif %}</small>
-    <form method="post" action="/settings/webhooks/{{ h.id }}/toggle" class="inline"><button type="submit" class="quiet">{% if h.enabled %}Disable{% else %}Enable{% endif %}</button></form>
-    <form method="post" action="/settings/webhooks/{{ h.id }}/test" class="inline"><button type="submit" class="quiet">Send test</button></form>
-    <form method="post" action="/settings/webhooks/{{ h.id }}/delete" class="inline"><button type="submit" class="quiet">Delete</button></form>
+    <strong>{{ r.h.name }}</strong> <span class="badge">{{ r.h.kind }}</span> {{ r.shown_url }}
+    <small>
+      {% if r.h.kind == "scheduled" %}meal plan of {{ r.household }} at {{ r.h.time_of_day.clone().unwrap_or_default() }}{% else %}{{ r.h.events.join(", ") }}{% if !r.group.is_empty() %}; only {{ r.group }}{% endif %}{% endif %}{% if !r.h.enabled %} (disabled){% endif %}
+    </small>
+    <a href="/settings/webhooks/{{ r.h.id }}/edit">Edit</a>
+    <form method="post" action="/settings/webhooks/{{ r.h.id }}/toggle" class="inline"><button type="submit" class="quiet">{% if r.h.enabled %}Disable{% else %}Enable{% endif %}</button></form>
+    <form method="post" action="/settings/webhooks/{{ r.h.id }}/test" class="inline"><button type="submit" class="quiet">Send test</button></form>
+    <form method="post" action="/settings/webhooks/{{ r.h.id }}/delete" class="inline"><button type="submit" class="quiet">Delete</button></form>
   </li>
 {% else %}<li>None yet.</li>{% endfor %}
 </ul>
+<p><small>The address is shown as scheme and host only: the rest of it may hold a token or a password.</small></p>
 <h2>Add</h2>
 <form method="post" action="/settings/webhooks" class="stack">
   <label>Name <input type="text" name="name" required></label>
   <label>Kind
-    <select name="kind"><option value="json">JSON</option><option value="ntfy">ntfy</option></select>
+    <select name="kind"><option value="json">JSON</option><option value="ntfy">ntfy</option><option value="scheduled">Scheduled meal plan</option></select>
   </label>
   <label>URL <input type="url" name="url" placeholder="http://ntfy.lab.internal/mealier" required></label>
-  <label>ntfy tags (comma-separated) <input type="text" name="ntfy_tags"></label>
   <fieldset>
-    <legend>Events</legend>
-    <label><input type="checkbox" name="ev_import_failed" checked> import_failed</label>
-    <label><input type="checkbox" name="ev_batch_logged" checked> batch_logged</label>
+    <legend>Events (JSON and ntfy)</legend>
+    <label>Only this group's events
+      <select name="group_id"><option value="">Every group</option>{% for g in groups %}<option value="{{ g.value }}">{{ g.label }}</option>{% endfor %}</select>
+    </label>
+    <label>ntfy tags (comma-separated) <input type="text" name="ntfy_tags"></label>
+    {% for e in events %}<label><input type="checkbox" name="ev_{{ e.name }}"{% if e.on %} checked{% endif %}> {{ e.name }}</label>
+    {% endfor %}
+  </fieldset>
+  <fieldset>
+    <legend>Scheduled meal plan</legend>
+    <p><small>Sends the household's plan for the day once the time has passed (the instance timezone, <code>TZ</code>), when <code>mealier run-scheduled</code> runs.</small></p>
+    <label>Household
+      <select name="household_id"><option value="">Choose</option>{% for h in households %}<option value="{{ h.value }}">{{ h.label }}</option>{% endfor %}</select>
+    </label>
+    <label>Time of day <input type="time" name="time_of_day"></label>
+    <label><input type="checkbox" name="enabled"> Enabled (a scheduled webhook starts disabled)</label>
   </fieldset>
   <button type="submit">Add webhook</button>
 </form>

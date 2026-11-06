@@ -313,6 +313,7 @@ async fn openapi_lists_every_recipe_route() {
         "GET /api/recipes/{id}/share-links",
         "POST /api/recipes/{id}/share-links",
         "DELETE /api/share-links/{id}",
+        "DELETE /api/shopping-lists/{id}",
     ];
     expected.sort();
     assert_eq!(found, expected);

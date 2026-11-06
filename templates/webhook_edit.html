@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Edit webhook - mealier{% endblock %}
+{% block content %}
+<h1>Edit webhook</h1>
+<form method="post" action="/settings/webhooks/{{ h.id }}/edit" class="stack">
+  <p><span class="badge">{{ h.kind }}</span></p>
+  <label>Name <input type="text" name="name" value="{{ h.name }}" required></label>
+  <label>URL <input type="url" name="url" placeholder="{{ shown_url }} (leave empty to keep the saved address)"></label>
+  <label><input type="checkbox" name="enabled"{% if h.enabled %} checked{% endif %}> Enabled</label>
+  {% if h.kind == "scheduled" %}
+  <label>Household
+    <select name="household_id">{% for x in households %}<option value="{{ x.value }}"{% if x.selected %} selected{% endif %}>{{ x.label }}</option>{% endfor %}</select>
+  </label>
+  <label>Time of day <input type="time" name="time_of_day" value="{{ h.time_of_day.clone().unwrap_or_default() }}" required></label>
+  {% else %}
+  <label>Only this group's events
+    <select name="group_id"><option value="">Every group</option>{% for g in groups %}<option value="{{ g.value }}"{% if g.selected %} selected{% endif %}>{{ g.label }}</option>{% endfor %}</select>
+  </label>
+  <label>ntfy tags (comma-separated) <input type="text" name="ntfy_tags" value="{{ h.ntfy_tags }}"></label>
+  <fieldset>
+    <legend>Events</legend>
+    {% for e in events %}<label><input type="checkbox" name="ev_{{ e.name }}"{% if e.on %} checked{% endif %}> {{ e.name }}</label>
+    {% endfor %}
+  </fieldset>
+  {% endif %}
+  <button type="submit">Save</button> <a href="/settings/webhooks">Cancel</a>
+</form>
+{% endblock %}

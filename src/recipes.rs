@@ -572,6 +572,7 @@ impl Db {
         let mut tx = self.pool.begin().await?;
         let recipe = rewrite(&mut tx, sc.group_id, id, Some(input), image).await?;
         tx.commit().await?;
+        self.changed("recipe_updated", sc, recipe.id, recipe.content.name.clone(), serde_json::json!({}));
         Ok(recipe)
     }
 
@@ -587,6 +588,8 @@ impl Db {
         if n.rows_affected() == 0 {
             return Err(Error::NotFound("recipe"));
         }
+        let name = self.get_recipe(sc, id).await?.map(|r| r.content.name).unwrap_or_default();
+        self.changed("recipe_deleted", sc, id, name, serde_json::json!({}));
         Ok(())
     }
 
@@ -632,6 +635,7 @@ impl Db {
             link_image(&mut tx, recipe.id, photo, dir).await?;
         }
         tx.commit().await?;
+        self.changed("recipe_created", sc, recipe.id, recipe.content.name.clone(), serde_json::json!({}));
         Ok(recipe)
     }
 

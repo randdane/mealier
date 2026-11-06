@@ -16,6 +16,7 @@ pub(super) fn routes() -> Router<AppState> {
     Router::new()
         .route("/settings/cook-theme", post(set_theme))
         .route("/settings/webhooks", get(webhooks_page).post(webhook_create))
+        .route("/settings/webhooks/{id}/edit", get(webhook_edit_page).post(webhook_edit))
         .route("/settings/webhooks/{id}/delete", post(webhook_delete))
         .route("/settings/webhooks/{id}/toggle", post(webhook_toggle))
         .route("/settings/webhooks/{id}/test", post(webhook_test))
@@ -44,11 +45,35 @@ async fn set_theme(crate::CurrentUser { user, .. }: crate::CurrentUser, State(db
     Ok(Redirect::to(&back))
 }
 
+/// One choice of a `<select>`.
+struct Choice {
+    value: i64,
+    label: String,
+    selected: bool,
+}
+
+/// One event checkbox.
+struct EventBox {
+    name: &'static str,
+    on: bool,
+}
+
+struct HookRow {
+    h: crate::Webhook,
+    shown_url: String,
+    /// "" for every group.
+    group: String,
+    household: String,
+}
+
 #[derive(Template, WebTemplate)]
 #[template(path = "webhooks.html")]
 struct WebhooksPage {
-    hooks: Vec<crate::Webhook>,
+    hooks: Vec<HookRow>,
     msg: String,
+    groups: Vec<Choice>,
+    households: Vec<Choice>,
+    events: Vec<EventBox>,
 }
 
 #[derive(Deserialize)]
@@ -56,24 +81,77 @@ struct MsgQuery {
     msg: Option<String>,
 }
 
+/// Group and household choices, `selected` marking the given ids.
+async fn choices(db: &Db, group: Option<i64>, household: Option<i64>) -> Result<(Vec<Choice>, Vec<Choice>)> {
+    let groups = db.groups().await?;
+    let name = |id: i64| groups.iter().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_default();
+    let households = db.households().await?.into_iter().map(|h| Choice { value: h.id, label: format!("{} / {}", name(h.group_id), h.name), selected: Some(h.id) == household }).collect();
+    Ok((groups.iter().map(|g| Choice { value: g.id, label: g.name.clone(), selected: Some(g.id) == group }).collect(), households))
+}
+
 async fn webhooks_page(_: crate::Admin, State(db): State<Db>, Query(q): Query<MsgQuery>) -> Result<WebhooksPage> {
-    Ok(WebhooksPage { hooks: db.list_webhooks().await?, msg: q.msg.unwrap_or_default() })
+    let (groups, households) = choices(&db, None, None).await?;
+    let label = |cs: &[Choice], id: Option<i64>| id.and_then(|i| cs.iter().find(|c| c.value == i)).map(|c| c.label.clone()).unwrap_or_default();
+    let hooks = db.list_webhooks().await?.into_iter().map(|h| HookRow { shown_url: h.masked_url(), group: label(&groups, h.group_id), household: label(&households, h.household_id), h }).collect();
+    let events = crate::EVENTS.iter().map(|e| EventBox { name: e, on: matches!(*e, "import_failed" | "batch_logged") }).collect();
+    Ok(WebhooksPage { hooks, msg: q.msg.unwrap_or_default(), groups, households, events })
 }
 
-#[derive(Deserialize)]
-struct WebhookForm {
-    name: String,
-    kind: String,
-    url: String,
-    #[serde(default)]
-    ntfy_tags: String,
-    ev_import_failed: Option<String>,
-    ev_batch_logged: Option<String>,
+/// The first value of `key` in a form.
+fn field<'a>(form: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    form.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 
-async fn webhook_create(_: crate::Admin, State(db): State<Db>, axum::Form(f): axum::Form<WebhookForm>) -> Result<Redirect> {
-    let events = [("import_failed", f.ev_import_failed), ("batch_logged", f.ev_batch_logged)].into_iter().filter(|(_, on)| on.is_some()).map(|(e, _)| e.to_string()).collect();
-    db.create_webhook(crate::WebhookInput { name: f.name, kind: f.kind, url: f.url, events, ntfy_tags: f.ntfy_tags, enabled: true }).await?;
+/// The webhook a form describes. `current` is the webhook being edited: its kind stays, and a blank URL keeps its URL.
+/// A scheduled webhook is enabled only if ticked (a new one starts disabled); other new ones are enabled.
+fn webhook_from_form(body: &[u8], current: Option<&crate::Webhook>) -> Result<crate::WebhookInput> {
+    let form = super::pairs(body)?;
+    let text = |k: &str| field(&form, k).unwrap_or_default().trim().to_string();
+    let kind = current.map_or_else(|| text("kind"), |w| w.kind.clone());
+    let scheduled = kind == "scheduled";
+    let url = match (text("url"), current) {
+        (u, Some(w)) if u.is_empty() => w.url.clone(),
+        (u, _) => u,
+    };
+    let ticked = field(&form, "enabled").is_some();
+    Ok(crate::WebhookInput {
+        name: text("name"),
+        kind,
+        url,
+        events: if scheduled { vec![] } else { crate::EVENTS.iter().filter(|e| field(&form, &format!("ev_{e}")).is_some()).map(|e| e.to_string()).collect() },
+        ntfy_tags: text("ntfy_tags"),
+        enabled: ticked || (current.is_none() && !scheduled),
+        group_id: if scheduled { None } else { super::id_of(&text("group_id"))? },
+        household_id: if scheduled { super::id_of(&text("household_id"))? } else { None },
+        time_of_day: Some(text("time_of_day")).filter(|t| scheduled && !t.is_empty()),
+    })
+}
+
+async fn webhook_create(_: crate::Admin, State(db): State<Db>, body: axum::body::Bytes) -> Result<Redirect> {
+    db.create_webhook(webhook_from_form(&body, None)?).await?;
+    Ok(Redirect::to("/settings/webhooks"))
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "webhook_edit.html")]
+struct WebhookEditPage {
+    h: crate::Webhook,
+    shown_url: String,
+    groups: Vec<Choice>,
+    households: Vec<Choice>,
+    events: Vec<EventBox>,
+}
+
+async fn webhook_edit_page(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>) -> Result<WebhookEditPage> {
+    let h = db.get_webhook(id).await?;
+    let (groups, households) = choices(&db, h.group_id, h.household_id).await?;
+    let events = crate::EVENTS.iter().map(|e| EventBox { name: e, on: h.events.iter().any(|x| x == e) }).collect();
+    Ok(WebhookEditPage { shown_url: h.masked_url(), h, groups, households, events })
+}
+
+async fn webhook_edit(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>, body: axum::body::Bytes) -> Result<Redirect> {
+    let current = db.get_webhook(id).await?;
+    db.update_webhook(id, webhook_from_form(&body, Some(&current))?).await?;
     Ok(Redirect::to("/settings/webhooks"))
 }
 
@@ -84,7 +162,7 @@ async fn webhook_delete(_: crate::Admin, State(db): State<Db>, Path(id): Path<i6
 
 async fn webhook_toggle(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
     let w = db.get_webhook(id).await?;
-    db.update_webhook(id, crate::WebhookInput { name: w.name, kind: w.kind, url: w.url, events: w.events, ntfy_tags: w.ntfy_tags, enabled: !w.enabled }).await?;
+    db.update_webhook(id, crate::WebhookInput { name: w.name, kind: w.kind, url: w.url, events: w.events, ntfy_tags: w.ntfy_tags, enabled: !w.enabled, group_id: w.group_id, household_id: w.household_id, time_of_day: w.time_of_day }).await?;
     Ok(Redirect::to("/settings/webhooks"))
 }
 

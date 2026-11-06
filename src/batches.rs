@@ -309,7 +309,7 @@ impl Db {
         let detail = self.get_batch(sc, id).await?;
         let b = &detail.batch;
         let recipe_name = self.get_recipe(sc, b.recipe_id).await.ok().flatten().map(|r| r.content.name).unwrap_or_default();
-        self.notify(crate::Event::BatchLogged { batch_id: id, recipe_id: b.recipe_id, recipe_name, rating: b.rating, made_on: b.made_on.clone() });
+        self.notify(crate::Event::BatchLogged { batch_id: id, recipe_id: b.recipe_id, recipe_name, rating: b.rating, made_on: b.made_on.clone(), group_id: sc.group_id });
         Ok(detail)
     }
     /// Stores one photo for the batch (png, jpeg or webp; see `images`).

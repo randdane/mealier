@@ -78,6 +78,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{report:#?}");
             return Ok(());
         }
+        Some("run-scheduled") => {
+            let db = Db::open(&data_dir()?.join(mealier::backup::DB_FILE)).await?;
+            let r = db.run_scheduled(&mealier::Clock::now()).await?;
+            println!("scheduled webhooks: sent {}, failed {}, not due {}, already sent {}, nothing planned {}", r.sent, r.failed, r.not_due, r.already_sent, r.empty);
+            if r.failed > 0 {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
         Some("export") => {
             let out = std::env::args().nth(2).ok_or("usage: mealier export <out.zip>")?;
             mealier::backup::export_dir(&data_dir()?, std::path::Path::new(&out)).await?;
@@ -93,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             return Ok(());
         }
-        Some(other) => return Err(format!("unknown command '{other}' (commands: hash-password, healthcheck, import-mealie <zip>, export <out.zip>, restore <in.zip>; the server takes no arguments)").into()),
+        Some(other) => return Err(format!("unknown command '{other}' (commands: hash-password, healthcheck, import-mealie <zip>, run-scheduled, export <out.zip>, restore <in.zip>; the server takes no arguments)").into()),
         None => {}
     }
     let dir = data_dir()?;

@@ -385,15 +385,58 @@ import only. Events:
 - `cookbook_created`, `cookbook_updated`, `cookbook_deleted`
 
 These cover every event a Mealie v3.28 notifier can subscribe to that has a
-mealier equivalent.
+mealier equivalent. They are raised from the store, after the change has
+committed, one call site per event, and never for a change that failed. The
+importer and restore raise none.
+
+JSON payload: `{"event", "occurred_at", "data"}`. `data` per event:
+
+- `recipe_*`: `recipe_id`, `name`, `group_id`, `url` (the recipe page; `deleted`
+  means archived). `recipe_updated` is raised by an edit through the recipe
+  form or API or a new image, not by attaching a file, note or link.
+- `mealplan_entry_created`: `mealplan_entry_id`, `name` (the entry's title, or
+  its recipe's name), `group_id`, `household_id`, `date`, `slot`, `recipe_id`
+  (or null), `url` (`/plan`).
+- `shopping_list_created`/`_updated`/`_deleted`: `shopping_list_id`, `name`,
+  `group_id`, `household_id`, `url` (the list; `/lists` once deleted).
+  `_updated` is any change to the list's items or extras. A list is deleted
+  with `DELETE /api/shopping-lists/{id}`, which removes its items.
+- `cookbook_*`: `cookbook_id`, `name`, `group_id`, `url` (`/cookbooks` once
+  deleted).
+- `batch_logged`, `import_failed`: as before (their group is known but is not
+  in `data`).
+
+`url` is absolute when `MEALIER_BASE_URL` is set. ntfy gets the event name as
+its title ("Recipe created"), the name as the body and `url` as the click link.
+
+A webhook may carry a `group_id`: it then receives only events of that group,
+and never one that has no group (the "Send test" button ignores the filter).
+
+Notifier addresses hold tokens. The settings page shows a webhook's URL as
+scheme and host only (the edit form keeps the saved one when left empty); a
+delivery error never repeats the URL; the importer's report names only the
+scheme of an address it cannot use. The API returns the URL in full to admins.
 
 ### Scheduled webhooks
 
 Mealie's scheduled meal-plan webhooks are kept as webhooks of kind `scheduled`
-with a time of day. The app never runs them by itself. `mealier run-scheduled`
-sends each enabled one whose time has passed today and has not yet been sent
-today (a per-day key prevents duplicates). An outside timer may call it;
-nothing does by default. Imported ones start disabled.
+with a `time_of_day` (`HH:MM`, in the instance timezone: `TZ`, UTC when unset)
+and a household (its group follows). The app never runs them by itself.
+`mealier run-scheduled` sends each enabled one whose time has passed today and
+has not yet been sent today (`webhook_runs` holds one row per webhook and day).
+A failed send is recorded with its error and tried again by the next run that
+day; a sent one is never sent again that day. Runs are not locked against each
+other. An outside timer may call it; nothing does by default. It prints a
+count line and exits non-zero if any send failed. Imported ones start
+disabled, and so does one made on the settings page unless "enabled" is ticked.
+
+The body is `{"date", "household_id", "group_id", "entries": [{"date", "slot",
+"title", "text", "recipe": {"id", "name", "slug", "url"} | null}]}`: the
+household's plan for today, breakfast to drink. Like Mealie, an empty plan
+sends nothing and records nothing, so a later run that day still sends if
+something was planned meanwhile. (Mealie's own body is a list of its plan
+entries; the keys here match it loosely, not exactly.) `slug` is derived from
+the name, since mealier recipes have none.
 
 ### Auth
 
@@ -483,8 +526,24 @@ notifiers; scheduled webhooks.
 - Mealie has no quantity ranges: `qty_min = qty_max`, original text kept.
 - Notifiers: Apprise `ntfy://`/`ntfys://` URLs become ntfy webhooks,
   `json://`/`jsons://` become JSON webhooks; other schemes are reported as
-  skipped. Subscribed events map to the mealier events above.
-- Scheduled webhooks are imported disabled.
+  skipped, naming only the scheme. A notifier's group becomes the webhook's group
+  filter (its household is not kept). Its `enabled` is kept.
+  - Apprise forms: `ntfys://host/topic` is `https://host/topic`, `ntfy://host/topic`
+    is `http://host/topic`, `user:pass@` stays in the URL as basic auth,
+    `ntfy://topic` is the hosted `https://ntfy.sh/topic`. Several topics, or a
+    user without a password (a token), are skipped. A query string (Apprise
+    options) is dropped and reported.
+  - Options: `group_events_notifier_options` booleans of the same name map to the
+    events `recipe_created`/`_updated`/`_deleted`, `mealplan_entry_created`,
+    `shopping_list_created`/`_updated`/`_deleted` and
+    `cookbook_created`/`_updated`/`_deleted`. The rest (`user_signup`, `data_*`,
+    `mealplan_entry_updated`/`_deleted`, `tag_*`, `category_*`, `label_*`) have no
+    mealier event and are named on one line per notifier; a notifier left with no
+    event is skipped.
+- Scheduled webhooks (`webhook_urls`: `group_id`, `household_id`, `name`, `url`,
+  `scheduled_time`, the unused `time` as a fallback) are imported disabled. Mealie
+  keeps the time in UTC; it is kept as written and one report line says so. A
+  URL that is not http(s), or no readable time, skips the row.
 - Favourites and ratings: `users_to_recipes` (`user_id`, `recipe_id`, `rating`, `is_favorite`). A
   rating of 0 or none is no rating; others are kept to the nearest half star in 0.5 to 5 and reported
   when that changed them; a row with neither a favourite nor a rating is dropped. A user and recipe of
@@ -524,7 +583,7 @@ one copy) with image hashes in snapshots, batch cook mode from the snapshot and
 remembered ticks, one quantity-range helper, export and restore, error mapping
 in one module with HTML error pages, `web.rs` split by page area, full recipe
 form. 12. Labels and shopping-list sections. 13. Cookbook filters and meal-plan
-rules.
+rules. 15. Notifier events and scheduled webhooks (2026-11-06, not committed).
 
 Remaining, in order:
 
@@ -533,7 +592,6 @@ Remaining, in order:
     (2026-11-06): favourites and ratings, recipe actions, foods on hand and tools
     owned, share links, and their importer mapping. Filter `rating` reads the caller's own rating
     (owner approved rewriting `tests/filter.rs::last_made_and_rating_read_the_callers_household`).
-15. Notifier events and scheduled webhooks.
 16. Fixture and importer coverage for every mapped table.
 17. Deploy (`stacks/mealier`).
 
@@ -541,10 +599,11 @@ Remaining, in order:
 
 2026-11-06.
 
-- Phase: step 14 done and committed; step 15 in progress.
+- Phase: step 14 done and committed; step 15 done, not committed (notifier events, scheduled webhooks,
+  `mealier run-scheduled`, importer for notifiers and `webhook_urls`).
 - Blocked on the owner: nothing until step 17 (a GitHub repo, an Authentik application, and
   secrets).
-- Next: 15–16 without stopping unless a decision is needed.
+- Next: 16 without stopping unless a decision is needed.
 - Production Mealie still holds the `mealier-fixture` items and three extra
   backups; `scripts/cleanup-mealie-fixture.py` removes the items after step 16
   (step 16 adds more fixture data first).
