@@ -2,20 +2,32 @@
 {% block title %}{{ name }} - mealier{% endblock %}
 {% block content %}
 <h1>{{ name }}</h1>
-<ul class="items">
-{% for i in items %}
-  <li>
-    <form method="post" action="/lists/items/{{ i.id }}/check" class="inline">
-      <label><input type="checkbox" name="checked" value="1"{% if i.checked %} checked{% endif %}
-             hx-post="/lists/items/{{ i.id }}/check" hx-trigger="change" hx-swap="none"><span>{{ i.text }}</span></label>
-      <noscript><button type="submit">Save</button></noscript>
+{% for s in sections %}
+<section class="section" style="border-left: 4px solid {{ s.color }}; padding-left: .75rem">
+  <h2>{{ s.title }}
+  {% if let Some(l) = s.label_id %}
+    <form method="post" action="/lists/{{ id }}/sections/{{ l }}/move" class="inline">
+      <button type="submit" name="dir" value="up" class="quiet" aria-label="Move {{ s.title }} up">Up</button>
+      <button type="submit" name="dir" value="down" class="quiet" aria-label="Move {{ s.title }} down">Down</button>
     </form>
-    <form method="post" action="/lists/items/{{ i.id }}/delete" class="inline"><button type="submit" class="quiet" aria-label="Delete {{ i.text }}">Delete</button></form>
-  </li>
+  {% endif %}
+  </h2>
+  <ul class="items">
+  {% for i in s.items %}
+    <li>
+      <form method="post" action="/lists/items/{{ i.id }}/check" class="inline">
+        <label><input type="checkbox" name="checked" value="1"{% if i.checked %} checked{% endif %}
+               hx-post="/lists/items/{{ i.id }}/check" hx-trigger="change" hx-swap="none"><span>{{ i.text }}</span></label>
+        <noscript><button type="submit">Save</button></noscript>
+      </form>
+      <form method="post" action="/lists/items/{{ i.id }}/delete" class="inline"><button type="submit" class="quiet" aria-label="Delete {{ i.text }}">Delete</button></form>
+    </li>
+  {% endfor %}
+  </ul>
+</section>
 {% else %}
-  <li>Nothing on this list.</li>
+<p>Nothing on this list.</p>
 {% endfor %}
-</ul>
 
 <h2>Add an item</h2>
 <form method="post" action="/lists/{{ id }}/items" class="stack">

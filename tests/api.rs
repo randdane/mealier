@@ -265,6 +265,12 @@ async fn openapi_lists_every_recipe_route() {
         "POST /api/households",
         "GET /api/default-household",
         "PUT /api/default-household",
+        "GET /api/labels",
+        "POST /api/labels",
+        "PUT /api/labels/{id}",
+        "DELETE /api/labels/{id}",
+        "PUT /api/foods/{id}/label",
+        "PUT /api/shopping-lists/{id}/section-order",
         "GET /api/export",
         "POST /api/restore",
     ];

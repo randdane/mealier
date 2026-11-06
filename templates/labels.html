@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Labels - mealier{% endblock %}
+{% block content %}
+<h1>Labels</h1>
+<p><small>Labels group shopping-list items into sections. A food carries a default label; an item can override it. Shared by every household in the group.</small></p>
+<ul>
+{% for l in labels %}
+  <li>
+    <form method="post" action="/settings/labels/{{ l.id }}" class="inline">
+      <input type="color" name="color" value="{{ l.color }}" aria-label="Colour of {{ l.name }}">
+      <input type="text" name="name" value="{{ l.name }}" required aria-label="Name">
+      <button type="submit">Save</button>
+    </form>
+    <form method="post" action="/settings/labels/{{ l.id }}/delete" class="inline"><button type="submit" class="quiet" aria-label="Delete {{ l.name }}">Delete</button></form>
+  </li>
+{% else %}
+  <li>No labels yet.</li>
+{% endfor %}
+</ul>
+
+<h2>New label</h2>
+<form method="post" action="/settings/labels" class="stack">
+  <label>Name <input type="text" name="name" required></label>
+  <label>Colour <input type="color" name="color" value="#959595"></label>
+  <button type="submit">Add label</button>
+</form>
+{% endblock %}

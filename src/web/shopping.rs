@@ -17,6 +17,7 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/lists", get(lists_page).post(lists_create))
         .route("/lists/{id}", get(list_page))
         .route("/lists/{id}/items", post(list_add_item))
+        .route("/lists/{id}/sections/{label}/move", post(section_move))
         .route("/lists/add-recipe", post(list_add_recipe))
         .route("/lists/add-batch", post(list_add_batch))
         .route("/lists/items/{id}/check", post(item_check))
@@ -48,29 +49,54 @@ struct ItemRow {
     text: String,
 }
 
+struct SectionRow {
+    /// `None` for the unlabelled items, which cannot be moved.
+    label_id: Option<i64>,
+    title: String,
+    color: String,
+    items: Vec<ItemRow>,
+}
+
 #[derive(Template, WebTemplate)]
 #[template(path = "list.html")]
 struct ListPage {
     id: i64,
     name: String,
-    items: Vec<ItemRow>,
+    sections: Vec<SectionRow>,
     units: Vec<crate::Unit>,
 }
 
 async fn list_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<ListPage> {
     let list = db.shopping_list(&sc, id).await?;
     let (units, foods) = (db.units(&sc).await?, db.foods(&sc).await?);
-    let items = list
-        .items
+    let row = |i: &crate::ShoppingItem| {
+        let unit = i.unit_id.and_then(|u| units.iter().find(|x| x.id == u)).map(|u| u.name.as_str());
+        let food = i.food_id.and_then(|f| foods.iter().find(|x| x.id == f)).map(|f| f.name.as_str());
+        let text = [amount(i.qty, i.qty_max, unit), food.unwrap_or_default().to_string(), i.note.clone()];
+        ItemRow { id: i.id, checked: i.checked, text: text.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" ") }
+    };
+    let sections = list
+        .sections
         .iter()
-        .map(|i| {
-            let unit = i.unit_id.and_then(|u| units.iter().find(|x| x.id == u)).map(|u| u.name.as_str());
-            let food = i.food_id.and_then(|f| foods.iter().find(|x| x.id == f)).map(|f| f.name.as_str());
-            let text = [amount(i.qty, i.qty_max, unit), food.unwrap_or_default().to_string(), i.note.clone()];
-            ItemRow { id: i.id, checked: i.checked, text: text.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" ") }
+        .map(|s| SectionRow {
+            label_id: s.label.as_ref().map(|l| l.id),
+            title: s.label.as_ref().map_or("No label".into(), |l| l.name.clone()),
+            color: s.label.as_ref().map_or("var(--line)".into(), |l| l.color.clone()),
+            items: s.items.iter().map(row).collect(),
         })
         .collect();
-    Ok(ListPage { id, name: list.name, items, units })
+    Ok(ListPage { id, name: list.name, sections, units })
+}
+
+#[derive(Deserialize)]
+struct MoveForm {
+    /// `up` or `down`.
+    dir: String,
+}
+
+async fn section_move(sc: Scope, State(db): State<Db>, Path((id, label)): Path<(i64, i64)>, axum::Form(f): axum::Form<MoveForm>) -> Result<Redirect> {
+    db.move_section(&sc, id, label, f.dir == "up").await?;
+    Ok(Redirect::to(&format!("/lists/{id}")))
 }
 
 #[derive(Deserialize)]

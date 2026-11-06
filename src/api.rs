@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use axum::extract::FromRef;
 
-use crate::{Scope, Webhook, WebhookInput, EntryInput, ItemInput, MealPlanEntry, ShoppingList, ShoppingListSummary, ImportService, Parsed, Batch, BatchDetail, BatchInput, BatchLineInput, Db, Error, Recipe, RecipeInput, RecipeSummary, Snapshot, SnapshotSummary};
+use crate::{Label, LabelInput, Scope, Webhook, WebhookInput, EntryInput, ItemInput, MealPlanEntry, ShoppingList, ShoppingListSummary, ImportService, Parsed, Batch, BatchDetail, BatchInput, BatchLineInput, Db, Error, Recipe, RecipeInput, RecipeSummary, Snapshot, SnapshotSummary};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
@@ -24,7 +24,7 @@ pub struct ErrorBody {
     create, list, get_one, update, archive, snapshots, get_snapshot,
     start_batch, list_batches, get_batch, put_batch, add_line, finish_batch, add_photo, parse, import_url,
     get_plan, add_plan_entry, put_plan_entry, delete_plan_entry,
-    get_lists, create_list, get_list, add_list_item, put_item, delete_item, list_add_recipe, list_add_batch,
+    get_lists, create_list, get_list, list_labels, create_label, put_label, delete_label, put_food_label, put_section_order, add_list_item, put_item, delete_item, list_add_recipe, list_add_batch,
     list_webhooks, create_webhook, get_webhook, put_webhook, delete_webhook, test_webhook,
     get_llm, test_llm, nutrition_estimate,
     crate::backup::download, crate::backup::restore_api,
@@ -354,6 +354,65 @@ async fn get_list(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Resul
     Ok(Json(db.shopping_list(&sc, id).await?))
 }
 
+#[utoipa::path(get, path = "/api/labels", responses((status = 200, description = "The group's labels, by name", body = [Label])))]
+async fn list_labels(sc: Scope, State(db): State<Db>) -> Result<Json<Vec<Label>>, Error> {
+    Ok(Json(db.labels(&sc).await?))
+}
+
+#[utoipa::path(
+    post, path = "/api/labels", request_body = LabelInput,
+    responses((status = 201, description = "Label created", body = Label), (status = 422, description = "Empty or duplicate name, or colour not #rrggbb", body = ErrorBody))
+)]
+async fn create_label(sc: Scope, State(db): State<Db>, Json(i): Json<LabelInput>) -> Result<(StatusCode, Json<Label>), Error> {
+    Ok((StatusCode::CREATED, Json(db.add_label(&sc, i).await?)))
+}
+
+#[utoipa::path(
+    put, path = "/api/labels/{id}", params(("id" = i64, Path, description = "Label id")), request_body = LabelInput,
+    responses((status = 200, description = "Label updated", body = Label), (status = 404, description = "No such label", body = ErrorBody), (status = 422, description = "Invalid", body = ErrorBody))
+)]
+async fn put_label(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<LabelInput>) -> Result<Json<Label>, Error> {
+    Ok(Json(db.update_label(&sc, id, i).await?))
+}
+
+#[utoipa::path(
+    delete, path = "/api/labels/{id}", params(("id" = i64, Path, description = "Label id")),
+    responses((status = 204, description = "Deleted; foods and items lose it"), (status = 404, description = "No such label", body = ErrorBody))
+)]
+async fn delete_label(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
+    db.delete_label(&sc, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, ToSchema)]
+struct FoodLabel {
+    /// `null` clears the food's label.
+    label_id: Option<i64>,
+}
+
+#[utoipa::path(
+    put, path = "/api/foods/{id}/label", params(("id" = i64, Path, description = "Food id")), request_body = FoodLabel,
+    responses((status = 204, description = "Label set"), (status = 404, description = "No such food or label", body = ErrorBody))
+)]
+async fn put_food_label(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(b): Json<FoodLabel>) -> Result<StatusCode, Error> {
+    db.set_food_label(&sc, id, b.label_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, ToSchema)]
+struct SectionOrder {
+    /// Labels in the order their sections appear; others follow by name.
+    label_ids: Vec<i64>,
+}
+
+#[utoipa::path(
+    put, path = "/api/shopping-lists/{id}/section-order", params(("id" = i64, Path, description = "List id")), request_body = SectionOrder,
+    responses((status = 200, description = "The list with its sections reordered", body = ShoppingList), (status = 404, description = "No such list or label", body = ErrorBody), (status = 422, description = "A label listed twice", body = ErrorBody))
+)]
+async fn put_section_order(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, Json(b): Json<SectionOrder>) -> Result<Json<ShoppingList>, Error> {
+    Ok(Json(db.set_section_order(&sc, id, &b.label_ids).await?))
+}
+
 #[utoipa::path(
     post, path = "/api/shopping-lists/{id}/items", params(("id" = i64, Path, description = "List id")), request_body = ItemInput,
     responses(
@@ -583,6 +642,10 @@ pub fn router_with_restart(state: AppState, import: ImportService, auth: crate::
         .route("/api/meal-plan/{id}", put(put_plan_entry).delete(delete_plan_entry))
         .route("/api/shopping-lists", get(get_lists).post(create_list))
         .route("/api/shopping-lists/{id}", get(get_list))
+        .route("/api/shopping-lists/{id}/section-order", put(put_section_order))
+        .route("/api/labels", get(list_labels).post(create_label))
+        .route("/api/labels/{id}", put(put_label).delete(delete_label))
+        .route("/api/foods/{id}/label", put(put_food_label))
         .route("/api/shopping-lists/{id}/items", post(add_list_item))
         .route("/api/shopping-list-items/{id}", put(put_item).delete(delete_item))
         .route("/api/shopping-lists/{id}/recipes", post(list_add_recipe))

@@ -200,7 +200,10 @@ recipe for an empty day/slot.
 
 Per household. Add items by hand, from a recipe, or from a planned batch
 (using its scale, its actual amounts, substitute foods and added lines). Items
-are grouped by their food's label.
+are grouped into sections by label: the item's own label, else its food's, else "No label" (last).
+Sections follow the list's own order (`shopping_list_labels`: new lists get every group label in name
+order; labels without a place sort by name after the placed ones), changed with up/down buttons or
+`PUT /api/shopping-lists/{id}/section-order`.
 
 ### Foods on hand and tools
 
@@ -407,11 +410,10 @@ households. 11. Review fixes: site-local IPv6, image module (decode, resize,
 one copy) with image hashes in snapshots, batch cook mode from the snapshot and
 remembered ticks, one quantity-range helper, export and restore, error mapping
 in one module with HTML error pages, `web.rs` split by page area, full recipe
-form.
+form. 12. Labels and shopping-list sections.
 
 Remaining, in order:
 
-12. Labels and shopping-list sections.
 13. Cookbook filters and meal-plan rules.
 14. Recipe features: assets, notes, sections, ingredient links, substitutions,
     extras, favourites and ratings, settings, recipe actions, foods on hand and
@@ -424,12 +426,12 @@ Remaining, in order:
 
 2026-11-06.
 
-- Phase: step 11 (review fixes) done, not committed; 398 tests pass (1 ignored,
+- Phase: step 12 (labels and shopping-list sections) done, not committed; 408 tests pass (1 ignored,
   needs a real Mealie backup), clippy clean with `-D warnings`.
 - In flight: nothing. No agents or servers running.
 - Blocked on the owner: nothing until deploy (step 17 needs a GitHub repo,
   an Authentik application, and secrets).
-- Next: step 12 (labels and shopping-list sections), then 13–16 without
+- Next: step 13 (cookbook filters and meal-plan rules), then 14–16 without
   stopping unless a decision is needed.
 - Production Mealie still holds the `mealier-fixture` items and three extra
   backups; `scripts/cleanup-mealie-fixture.py` removes the items after step 16

@@ -572,3 +572,53 @@ async fn an_imported_recipes_one_snapshot_lists_its_image() {
     let b = recipe(&db, "mealier-fixture-recipe-b").await;
     assert!(b.content.images.is_empty());
 }
+
+#[tokio::test]
+async fn labels_come_over_with_their_colours_and_foods() {
+    let (db, report, _dir) = imported().await;
+    assert_eq!(report.labels, 33);
+    assert!(!report.skipped.iter().any(|s| s.contains("labels")), "{:?}", report.skipped);
+    let sc = tenant(&db).await;
+    let labels = db.labels(&sc).await.unwrap();
+    assert_eq!(labels.len(), 33);
+    let fixture_label = labels.iter().find(|l| l.name == "mealier-fixture-label").expect("fixture label");
+    assert_eq!(fixture_label.color, "#336699");
+    let flour = db.foods(&sc).await.unwrap().into_iter().find(|f| f.name == "mealier-fixture-flour").unwrap().id;
+    assert_eq!(db.food_label(&sc, flour).await.unwrap(), Some(fixture_label.clone()));
+}
+
+#[tokio::test]
+async fn the_lists_section_order_and_item_labels_are_imported() {
+    let (db, _report, _dir) = imported().await;
+    let sc = tenant(&db).await;
+    let list = db.shopping_list(&sc, db.shopping_lists(&sc).await.unwrap()[0].id).await.unwrap();
+    // "hand added" is flour, whose label is the fixture's; the others have no food
+    let names: Vec<_> = list.sections.iter().map(|s| s.label.as_ref().map(|l| l.name.as_str())).collect();
+    assert_eq!(names, vec![Some("mealier-fixture-label"), None]);
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM shopping_list_labels").fetch_one(db.pool()).await.unwrap();
+    assert_eq!(n, 33);
+
+    // reversed positions, an item with its own label, and flour's item given another: its own wins
+    let (_keep, zip) = mutated(|v| {
+        for r in v["shopping_lists_multi_purpose_labels"].as_array_mut().unwrap() {
+            r["position"] = (100 - r["position"].as_i64().unwrap()).into();
+        }
+        let id = |v: &serde_json::Value, name: &str| v["multi_purpose_labels"].as_array().unwrap().iter().find(|l| l["name"] == name).unwrap()["id"].clone();
+        v["shopping_list_items"][0]["label_id"] = id(v, "Pasta");
+        v["shopping_list_items"][1]["label_id"] = id(v, "Baking");
+    });
+    let db = Db::open_memory().await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    import_mealie_backup(&db, &zip, dir.path()).await.unwrap();
+    let sc = tenant(&db).await;
+    let list = db.shopping_list(&sc, db.shopping_lists(&sc).await.unwrap()[0].id).await.unwrap();
+    let got: Vec<_> = list.sections.iter().map(|s| (s.label.as_ref().map(|l| l.name.as_str()), s.items.iter().map(|i| i.note.as_str()).collect::<Vec<_>>())).collect();
+    assert_eq!(
+        got,
+        vec![
+            (Some("Pasta"), vec!["1 Cup Flour"]),
+            (Some("Baking"), vec!["hand added"]),
+            (None, vec!["mealier-fixture checked item", "mealier-fixture note-only item"]),
+        ]
+    );
+}

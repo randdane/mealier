@@ -77,6 +77,15 @@ pub struct ShoppingItem {
     pub note: String,
     pub checked: bool,
     pub recipe_id: Option<i64>,
+    /// The item's own label; its food's applies when this is empty.
+    pub label_id: Option<i64>,
+}
+
+/// Items under one label (`None`: no label), in the list's section order.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct ShoppingSection {
+    pub label: Option<crate::Label>,
+    pub items: Vec<ShoppingItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
@@ -84,6 +93,8 @@ pub struct ShoppingList {
     pub id: i64,
     pub name: String,
     pub items: Vec<ShoppingItem>,
+    /// The same items by effective label (item's, else food's, else none); empty sections left out.
+    pub sections: Vec<ShoppingSection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
@@ -244,11 +255,11 @@ impl Db {
             .fetch_optional(&self.pool)
             .await?
             .ok_or(Error::NotFound("shopping list"))?;
-        let rows = sqlx::query("SELECT id, qty, COALESCE(qty_max, qty), unit_id, food_id, note, checked, recipe_id FROM shopping_list_items WHERE list_id = ? ORDER BY id")
+        let rows = sqlx::query("SELECT id, qty, COALESCE(qty_max, qty), unit_id, food_id, note, checked, recipe_id, label_id FROM shopping_list_items WHERE list_id = ? ORDER BY id")
             .bind(id)
             .fetch_all(&self.pool)
             .await?;
-        let items = rows
+        let items: Vec<ShoppingItem> = rows
             .iter()
             .map(|r| ShoppingItem {
                 id: r.get(0),
@@ -259,9 +270,12 @@ impl Db {
                 note: r.get(5),
                 checked: r.get(6),
                 recipe_id: r.get(7),
+                label_id: r.get(8),
             })
             .collect();
-        Ok(ShoppingList { id, name, items })
+        let items: Vec<ShoppingItem> = items;
+        let sections = self.sections(sc, id, &items).await?;
+        Ok(ShoppingList { id, name, items, sections })
     }
 
     /// The mime type of the image named by `hash`, if a recipe in the caller's group or a batch of their household uses it.

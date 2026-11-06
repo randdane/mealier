@@ -9,7 +9,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
-use mealier::{AuthConfig, Db, Dimension, EntryInput, ImportService, IngredientInput, ItemInput, RecipeInput, api, hash_password};
+use mealier::{AuthConfig, Db, Dimension, EntryInput, ImportService, IngredientInput, ItemInput, LabelInput, RecipeInput, api, hash_password};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -89,6 +89,7 @@ struct Ids {
     item: i64,
     unit: i64,
     food: i64,
+    label: i64,
 }
 
 async fn world() -> World {
@@ -107,9 +108,10 @@ async fn world() -> World {
     let entry = db.add_entry(&t.a, EntryInput { date: "2026-12-01".into(), slot: "dinner".into(), recipe_id: Some(recipe.id), text: "private-plan-note".into(), ..Default::default() }).await.unwrap();
     let list = db.create_list(&t.a, "Weekly-secret").await.unwrap();
     let item = db.add_item(&t.a, list.id, ItemInput { note: "milk".into(), ..Default::default() }).await.unwrap();
+    let label = db.add_label(&t.a, LabelInput { name: "Produce".into(), color: "#00aa00".into() }).await.unwrap();
     let images = tempfile::tempdir().unwrap().keep();
     let app = api::router(api::AppState { db: db.clone(), images_dir: images.clone() });
-    let ids = Ids { recipe: recipe.id, snapshot: recipe.current_snapshot_id, batch: b.batch.id, line: b.lines[0].id, entry: entry.id, list: list.id, item: item.id, unit, food };
+    let ids = Ids { recipe: recipe.id, snapshot: recipe.current_snapshot_id, batch: b.batch.id, line: b.lines[0].id, entry: entry.id, list: list.id, item: item.id, unit, food, label: label.id };
     World { app, db, t, images, alice, bob, carol, ids }
 }
 
@@ -123,6 +125,8 @@ impl World {
             .replace("{entry}", &i.entry.to_string())
             .replace("{list}", &i.list.to_string())
             .replace("{item}", &i.item.to_string())
+            .replace("{food}", &i.food.to_string())
+            .replace("{label}", &i.label.to_string())
     }
 
     /// Everything the tenants own, as text: if an outsider's request changed anything, this changes.
@@ -138,7 +142,9 @@ impl World {
             "SELECT json_group_array(json_array(id, household_id, name)) FROM shopping_lists",
             "SELECT json_group_array(json_array(id, list_id, qty, unit_id, food_id, note, checked, recipe_id)) FROM shopping_list_items",
             "SELECT json_group_array(json_array(id, group_id, name)) FROM units",
-            "SELECT json_group_array(json_array(id, group_id, name)) FROM foods",
+            "SELECT json_group_array(json_array(id, group_id, name, label_id)) FROM foods",
+            "SELECT json_group_array(json_array(id, group_id, name, color)) FROM labels",
+            "SELECT json_group_array(json_array(list_id, label_id, position)) FROM shopping_list_labels",
         ] {
             let s: String = sqlx::query_scalar(sql).fetch_one(self.db.pool()).await.unwrap();
             out.push_str(&s);
@@ -153,8 +159,10 @@ enum Kind {
     Group,
     /// One household's own: another household of the same group is refused too.
     Household,
+    /// Group-wide, and the request removes it: the first household of the group to ask succeeds, the next finds it gone.
+    Spent,
 }
-use Kind::{Group, Household};
+use Kind::{Group, Household, Spent};
 
 struct Route {
     method: &'static str,
@@ -193,6 +201,10 @@ fn api_routes() -> Vec<Route> {
         r("DELETE", "/api/shopping-list-items/{item}", Household, none, 204),
         r("POST", "/api/shopping-lists/{list}/recipes", Household, |i| Req::Json(json!({"recipe_id": i.recipe, "scale": 1})), 200),
         r("POST", "/api/shopping-lists/{list}/batches", Household, |i| Req::Json(json!({"batch_id": i.batch})), 200),
+        r("PUT", "/api/labels/{label}", Group, |_| Req::Json(json!({"name": "Renamed", "color": "#010203"})), 200),
+        r("DELETE", "/api/labels/{label}", Spent, none, 204),
+        r("PUT", "/api/foods/{food}/label", Group, |_| Req::Json(json!({"label_id": null})), 204),
+        r("PUT", "/api/shopping-lists/{list}/section-order", Household, |i| Req::Json(json!({"label_ids": [i.label]})), 200),
     ]
 }
 
@@ -220,6 +232,9 @@ fn html_routes() -> Vec<Route> {
         r("POST", "/lists/{list}/items", Household, |_| Req::Form("item=milk&qty=1".into()), 303),
         r("POST", "/lists/items/{item}/check", Household, |_| Req::Form("checked=on".into()), 303),
         r("POST", "/lists/items/{item}/delete", Household, |_| Req::Form(String::new()), 303),
+        r("POST", "/lists/{list}/sections/{label}/move", Household, |_| Req::Form("dir=up".into()), 303),
+        r("POST", "/settings/labels/{label}", Group, |_| Req::Form("name=Renamed&color=%23010203".into()), 303),
+        r("POST", "/settings/labels/{label}/delete", Spent, |_| Req::Form(String::new()), 303),
     ]
 }
 
@@ -241,7 +256,12 @@ async fn check_route(r: &Route) {
             assert_eq!(s, StatusCode::NOT_FOUND, "{name} as another household: {text}");
             assert_eq!(w.fingerprint().await, before, "{name} as another household changed something");
         }
-        Group => assert_eq!(s.as_u16(), r.ok, "{name}: a household of the same group shares it: {text}"),
+        Group | Spent => assert_eq!(s.as_u16(), r.ok, "{name}: a household of the same group shares it: {text}"),
+    }
+    if r.kind == Spent {
+        let (s, _, text) = send(&w.app, method, &uri, Some(&w.alice), (r.body)(&w.ids)).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{name}: already removed by the other household: {text}");
+        return;
     }
 
     // the owner: proves the route and body are right, so the 404s above were about the tenant
@@ -334,6 +354,7 @@ async fn ids_in_request_bodies_are_checked_against_the_callers_tenant() {
     let c_recipe = w.db.create_recipe(&w.t.c, RecipeInput { name: "Theirs".into(), ..Default::default() }).await.unwrap().id;
     let c_list = w.db.create_list(&w.t.c, "C list").await.unwrap().id;
     let b_list = w.db.create_list(&w.t.b, "B list").await.unwrap().id;
+    let c_label = w.db.add_label(&w.t.c, LabelInput { name: "Theirs".into(), color: "#123456".into() }).await.unwrap().id;
     let i = &w.ids;
     let nf = StatusCode::NOT_FOUND;
     let cases: Vec<(&str, &str, String, String, Value)> = vec![
@@ -353,6 +374,10 @@ async fn ids_in_request_bodies_are_checked_against_the_callers_tenant() {
         ("alice", "POST", format!("/api/shopping-lists/{}/recipes", i.list), "recipe of another group".into(), json!({"recipe_id": c_recipe, "scale": 1})),
         ("bob", "POST", format!("/api/shopping-lists/{b_list}/batches"), "batch of another household".into(), json!({"batch_id": i.batch})),
         ("carol", "POST", format!("/api/shopping-lists/{c_list}/recipes"), "recipe of another group".into(), json!({"recipe_id": i.recipe, "scale": 1})),
+        ("alice", "PUT", format!("/api/foods/{}/label", i.food), "label of another group".into(), json!({"label_id": c_label})),
+        ("alice", "PUT", format!("/api/shopping-lists/{}/section-order", i.list), "label of another group".into(), json!({"label_ids": [c_label]})),
+        ("alice", "POST", format!("/api/shopping-lists/{}/items", i.list), "label of another group".into(), json!({"note": "x", "label_id": c_label})),
+        ("alice", "PUT", format!("/api/shopping-list-items/{}", i.item), "label of another group".into(), json!({"note": "x", "label_id": c_label})),
     ];
     for (who, method, uri, what, body) in cases {
         let token = match who {

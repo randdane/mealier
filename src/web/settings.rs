@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use super::Svc;
 use crate::api::AppState;
-use crate::{Db, Error, Result};
+use crate::{Db, Error, Result, Scope};
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -19,6 +19,9 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/settings/webhooks/{id}/delete", post(webhook_delete))
         .route("/settings/webhooks/{id}/toggle", post(webhook_toggle))
         .route("/settings/webhooks/{id}/test", post(webhook_test))
+        .route("/settings/labels", get(labels_page).post(label_create))
+        .route("/settings/labels/{id}", post(label_update))
+        .route("/settings/labels/{id}/delete", post(label_delete))
         .route("/settings/llm", get(llm_page))
         .route("/settings/llm/test", post(llm_test))
 }
@@ -87,6 +90,33 @@ async fn webhook_test(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>
         Err(e) => e.to_string(),
     };
     Ok(Redirect::to(&format!("/settings/webhooks?{}", serde_urlencoded::to_string([("msg", msg)]).unwrap_or_default())))
+}
+
+// Labels (group-wide; any signed-in user).
+
+#[derive(Template, WebTemplate)]
+#[template(path = "labels.html")]
+struct LabelsPage {
+    labels: Vec<crate::Label>,
+}
+
+async fn labels_page(sc: Scope, State(db): State<Db>) -> Result<LabelsPage> {
+    Ok(LabelsPage { labels: db.labels(&sc).await? })
+}
+
+async fn label_create(sc: Scope, State(db): State<Db>, axum::Form(f): axum::Form<crate::LabelInput>) -> Result<Redirect> {
+    db.add_label(&sc, f).await?;
+    Ok(Redirect::to("/settings/labels"))
+}
+
+async fn label_update(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<crate::LabelInput>) -> Result<Redirect> {
+    db.update_label(&sc, id, f).await?;
+    Ok(Redirect::to("/settings/labels"))
+}
+
+async fn label_delete(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
+    db.delete_label(&sc, id).await?;
+    Ok(Redirect::to("/settings/labels"))
 }
 
 // LLM settings.

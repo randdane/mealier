@@ -23,6 +23,7 @@ pub struct ImportReport {
     pub households: usize,
     pub units: usize,
     pub foods: usize,
+    pub labels: usize,
     pub recipes: usize,
     pub tags: usize,
     pub categories: usize,
@@ -287,12 +288,32 @@ async fn import_units_and_foods(tx: &mut Tx<'_>, b: &Backup, report: &mut Import
         let lid = sqlx::query_scalar("SELECT id FROM units WHERE group_id = ? AND name = ?").bind(group).bind(name).fetch_one(&mut **tx).await?;
         remember(tx, "unit", uuid, lid).await?;
     }
+    for l in b.rows("multi_purpose_labels") {
+        let (uuid, name) = (id(l, "id")?, id(l, "name")?);
+        let group = local(tx, "group", id(l, "group_id")?).await?;
+        let color = s(l, "color").map(str::to_lowercase).filter(|c| c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|d| d.is_ascii_hexdigit()));
+        if color.is_none() {
+            report.skipped.push(format!("label {name:?} has colour {:?}, not #rrggbb; it got Mealie's default grey", s(l, "color").unwrap_or_default()));
+        }
+        let r = sqlx::query("INSERT OR IGNORE INTO labels (group_id, name, color) VALUES (?, ?, ?)").bind(group).bind(name).bind(color.unwrap_or_else(|| "#959595".into())).execute(&mut **tx).await?;
+        if r.rows_affected() == 0 {
+            report.skipped.push(format!("label {name:?} appears twice; the second was merged into the first"));
+        } else {
+            report.labels += 1;
+        }
+        let lid = sqlx::query_scalar("SELECT id FROM labels WHERE group_id = ? AND name = ?").bind(group).bind(name).fetch_one(&mut **tx).await?;
+        remember(tx, "label", uuid, lid).await?;
+    }
     let food_aliases = aliases(b, "ingredient_foods_aliases", "food_id");
     for fo in b.rows("ingredient_foods") {
         let (uuid, name) = (id(fo, "id")?, id(fo, "name")?);
         let group = local(tx, "group", id(fo, "group_id")?).await?;
         let al = serde_json::to_string(food_aliases.get(uuid).unwrap_or(&vec![]))?;
-        let r = sqlx::query("INSERT OR IGNORE INTO foods (group_id, name, aliases) VALUES (?, ?, ?)").bind(group).bind(name).bind(al).execute(&mut **tx).await?;
+        let label = local_opt(tx, "label", s(fo, "label_id")).await?;
+        if let Some(l) = label {
+            same_group(tx, "labels", l, group, "food's label").await?;
+        }
+        let r = sqlx::query("INSERT OR IGNORE INTO foods (group_id, name, aliases, label_id) VALUES (?, ?, ?, ?)").bind(group).bind(name).bind(al).bind(label).execute(&mut **tx).await?;
         if r.rows_affected() == 0 {
             report.skipped.push(format!("food {name:?} appears twice; the second was merged into the first"));
         } else {
@@ -300,10 +321,6 @@ async fn import_units_and_foods(tx: &mut Tx<'_>, b: &Backup, report: &mut Import
         }
         let lid = sqlx::query_scalar("SELECT id FROM foods WHERE group_id = ? AND name = ?").bind(group).bind(name).fetch_one(&mut **tx).await?;
         remember(tx, "food", uuid, lid).await?;
-    }
-    let labels = b.rows("multi_purpose_labels").len();
-    if labels > 0 {
-        report.skipped.push(format!("{labels} labels (food and shopping-list categories) are not imported"));
     }
     Ok(())
 }
@@ -536,13 +553,14 @@ async fn import_shopping(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport)
         let list_uuid = id(i, "shopping_list_id")?;
         let group = *list_group.get(list_uuid).ok_or_else(|| Error::Validation("backup refers to a shopping_list it does not contain".into()))?;
         let (unit, food) = (local_opt(tx, "unit", s(i, "unit_id")).await?, local_opt(tx, "food", s(i, "food_id")).await?);
+        let label = local_opt(tx, "label", s(i, "label_id")).await?;
         let recipe = local_opt(tx, "recipe", item_recipes.get(id(i, "id")?).copied()).await?;
-        for (table, what, found) in [("units", "unit", unit), ("foods", "food", food), ("recipes", "recipe", recipe)] {
+        for (table, what, found) in [("units", "unit", unit), ("foods", "food", food), ("recipes", "recipe", recipe), ("labels", "label", label)] {
             if let Some(x) = found {
                 same_group(tx, table, x, group, &format!("shopping list item's {what}")).await?;
             }
         }
-        sqlx::query("INSERT INTO shopping_list_items (list_id, qty, unit_id, food_id, note, checked, recipe_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO shopping_list_items (list_id, qty, unit_id, food_id, note, checked, recipe_id, label_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(local(tx, "shopping_list", list_uuid).await?)
             .bind(q)
             .bind(unit)
@@ -550,9 +568,17 @@ async fn import_shopping(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport)
             .bind(s(i, "note").unwrap_or(""))
             .bind(flag(i, "checked"))
             .bind(recipe)
+            .bind(label)
             .execute(&mut **tx)
             .await?;
         report.shopping_list_items += 1;
+    }
+    for p in b.rows("shopping_lists_multi_purpose_labels") {
+        let list = local(tx, "shopping_list", id(p, "shopping_list_id")?).await?;
+        let label = local(tx, "label", id(p, "label_id")?).await?;
+        let group = *list_group.get(id(p, "shopping_list_id")?).ok_or_else(|| Error::Validation("backup refers to a shopping_list it does not contain".into()))?;
+        same_group(tx, "labels", label, group, "shopping list's label order").await?;
+        sqlx::query("INSERT OR REPLACE INTO shopping_list_labels (list_id, label_id, position) VALUES (?, ?, ?)").bind(list).bind(label).bind(p.get("position").and_then(Value::as_i64).unwrap_or(0)).execute(&mut **tx).await?;
     }
     if !b.rows("shopping_list_recipe_reference").is_empty() {
         report.skipped.push("shopping lists' own recipe references are not imported; items keep theirs".into());
