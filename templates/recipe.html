@@ -16,6 +16,24 @@
 {% for s in steps %}<li>{{ s }}</li>{% endfor %}
 </ol>
 
+<h2>Plan</h2>
+<form method="post" action="/plan/entries" class="stack">
+  <input type="hidden" name="recipe_id" value="{{ id }}">
+  <label>Date <input type="date" name="date" value="{{ today }}" required></label>
+  <label>Meal <select name="slot">{% for s in slots %}<option value="{{ s }}"{% if s == &"dinner" %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
+  <label>Plan a batch at scale <input type="number" name="scale" step="any" min="0" inputmode="decimal" placeholder="none"></label>
+  <button type="submit">Plan</button>
+</form>
+
+<h2>Shopping list</h2>
+<form method="post" action="/lists/add-recipe" class="stack">
+  <input type="hidden" name="recipe_id" value="{{ id }}">
+  <label>List <select name="list_id"><option value="">(choose)</option>{% for l in lists %}<option value="{{ l.id }}">{{ l.name }}</option>{% endfor %}</select></label>
+  <label>or new <input type="text" name="new_list" placeholder="New list name"></label>
+  <label>Scale <input type="number" name="scale" value="1" step="any" min="0" required inputmode="decimal"></label>
+  <button type="submit">Add to shopping list</button>
+</form>
+
 <h2>Start a batch</h2>
 <form method="post" action="/recipes/{{ id }}/batches" class="inline">
   <label>Scale <input type="number" name="scale" value="1" step="any" min="0" required inputmode="decimal"></label>

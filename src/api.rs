@@ -1,7 +1,7 @@
 use axum::extract::{DefaultBodyLimit, Multipart, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::extract::Path;
 use axum::{Extension, Json, Router};
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use axum::extract::FromRef;
 
-use crate::{ImportService, Parsed, Batch, BatchDetail, BatchInput, BatchLineInput, Db, Error, Recipe, RecipeInput, RecipeSummary, Snapshot, SnapshotSummary};
+use crate::{EntryInput, ItemInput, MealPlanEntry, ShoppingList, ShoppingListSummary, ImportService, Parsed, Batch, BatchDetail, BatchInput, BatchLineInput, Db, Error, Recipe, RecipeInput, RecipeSummary, Snapshot, SnapshotSummary};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
@@ -23,7 +23,9 @@ pub struct ErrorBody {
 #[derive(OpenApi)]
 #[openapi(paths(
     create, list, get_one, update, archive, snapshots, get_snapshot,
-    start_batch, list_batches, get_batch, put_batch, add_line, finish_batch, add_photo, parse, import_url
+    start_batch, list_batches, get_batch, put_batch, add_line, finish_batch, add_photo, parse, import_url,
+    get_plan, add_plan_entry, put_plan_entry, delete_plan_entry,
+    get_lists, create_list, get_list, add_list_item, put_item, delete_item, list_add_recipe, list_add_batch
 ))]
 struct ApiDoc;
 
@@ -282,6 +284,153 @@ async fn import_url(State(s): State<AppState>, Extension(svc): Extension<Arc<Imp
     Ok((StatusCode::CREATED, Json(svc.import(&s.db, &s.images_dir, &req.url).await?)))
 }
 
+#[derive(Deserialize, IntoParams)]
+struct PlanRange {
+    /// First day, YYYY-MM-DD (inclusive).
+    from: Option<String>,
+    /// Last day, YYYY-MM-DD (inclusive).
+    to: Option<String>,
+}
+
+#[utoipa::path(
+    get, path = "/api/meal-plan", params(PlanRange),
+    responses(
+        (status = 200, description = "Entries from `from` to `to`, by date then slot", body = [MealPlanEntry]),
+        (status = 422, description = "`from` or `to` missing", body = ErrorBody),
+    )
+)]
+async fn get_plan(State(db): State<Db>, Query(r): Query<PlanRange>) -> Result<Json<Vec<MealPlanEntry>>, Error> {
+    let (Some(from), Some(to)) = (r.from, r.to) else { return Err(Error::Validation("from and to are required".into())) };
+    Ok(Json(db.meal_plan(&from, &to).await?))
+}
+
+#[utoipa::path(
+    post, path = "/api/meal-plan", request_body = EntryInput,
+    responses(
+        (status = 201, description = "Entry added", body = MealPlanEntry),
+        (status = 404, description = "No such recipe or batch", body = ErrorBody),
+        (status = 422, description = "Bad date or slot, no recipe or title, or the batch is not a planned batch of the recipe", body = ErrorBody),
+    )
+)]
+async fn add_plan_entry(State(db): State<Db>, Json(i): Json<EntryInput>) -> Result<(StatusCode, Json<MealPlanEntry>), Error> {
+    Ok((StatusCode::CREATED, Json(db.add_entry(i).await?)))
+}
+
+#[utoipa::path(
+    put, path = "/api/meal-plan/{id}", params(("id" = i64, Path, description = "Entry id")), request_body = EntryInput,
+    responses(
+        (status = 200, description = "Entry replaced", body = MealPlanEntry),
+        (status = 404, description = "No such entry, recipe or batch", body = ErrorBody),
+        (status = 422, description = "Invalid entry", body = ErrorBody),
+    )
+)]
+async fn put_plan_entry(State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<EntryInput>) -> Result<Json<MealPlanEntry>, Error> {
+    Ok(Json(db.update_entry(id, i).await?))
+}
+
+#[utoipa::path(
+    delete, path = "/api/meal-plan/{id}", params(("id" = i64, Path, description = "Entry id")),
+    responses((status = 204, description = "Entry deleted"), (status = 404, description = "No such entry", body = ErrorBody))
+)]
+async fn delete_plan_entry(State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
+    db.delete_entry(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(get, path = "/api/shopping-lists", responses((status = 200, description = "All lists", body = [ShoppingListSummary])))]
+async fn get_lists(State(db): State<Db>) -> Result<Json<Vec<ShoppingListSummary>>, Error> {
+    Ok(Json(db.shopping_lists().await?))
+}
+
+#[derive(Deserialize, ToSchema)]
+struct NewList {
+    name: String,
+}
+
+#[utoipa::path(
+    post, path = "/api/shopping-lists", request_body = NewList,
+    responses((status = 201, description = "List created", body = ShoppingListSummary), (status = 422, description = "Empty name", body = ErrorBody))
+)]
+async fn create_list(State(db): State<Db>, Json(l): Json<NewList>) -> Result<(StatusCode, Json<ShoppingListSummary>), Error> {
+    Ok((StatusCode::CREATED, Json(db.create_list(&l.name).await?)))
+}
+
+#[utoipa::path(
+    get, path = "/api/shopping-lists/{id}", params(("id" = i64, Path, description = "List id")),
+    responses((status = 200, description = "The list and its items", body = ShoppingList), (status = 404, description = "No such list", body = ErrorBody))
+)]
+async fn get_list(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<ShoppingList>, Error> {
+    Ok(Json(db.shopping_list(id).await?))
+}
+
+#[utoipa::path(
+    post, path = "/api/shopping-lists/{id}/items", params(("id" = i64, Path, description = "List id")), request_body = ItemInput,
+    responses(
+        (status = 201, description = "Item added as given (hand items are not merged)", body = crate::ShoppingItem),
+        (status = 404, description = "No such list, unit or food", body = ErrorBody),
+        (status = 422, description = "No food or note, or an invalid amount", body = ErrorBody),
+    )
+)]
+async fn add_list_item(State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<ItemInput>) -> Result<(StatusCode, Json<crate::ShoppingItem>), Error> {
+    Ok((StatusCode::CREATED, Json(db.add_item(id, i).await?)))
+}
+
+#[utoipa::path(
+    put, path = "/api/shopping-list-items/{id}", params(("id" = i64, Path, description = "Item id")), request_body = ItemInput,
+    responses(
+        (status = 200, description = "Item replaced; `checked` ticks it off", body = crate::ShoppingItem),
+        (status = 404, description = "No such item, unit or food", body = ErrorBody),
+        (status = 422, description = "No food or note, or an invalid amount", body = ErrorBody),
+    )
+)]
+async fn put_item(State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<ItemInput>) -> Result<Json<crate::ShoppingItem>, Error> {
+    Ok(Json(db.update_item(id, i).await?))
+}
+
+#[utoipa::path(
+    delete, path = "/api/shopping-list-items/{id}", params(("id" = i64, Path, description = "Item id")),
+    responses((status = 204, description = "Item deleted"), (status = 404, description = "No such item", body = ErrorBody))
+)]
+async fn delete_item(State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
+    db.delete_item(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, ToSchema)]
+struct ListRecipe {
+    recipe_id: i64,
+    /// Multiplier on the recipe's amounts; greater than 0.
+    scale: f64,
+}
+
+#[utoipa::path(
+    post, path = "/api/shopping-lists/{id}/recipes", params(("id" = i64, Path, description = "List id")), request_body = ListRecipe,
+    responses(
+        (status = 200, description = "The list after the recipe's ingredients were added or merged into unchecked items of the same food", body = ShoppingList),
+        (status = 404, description = "No such list or recipe", body = ErrorBody),
+        (status = 422, description = "Invalid scale", body = ErrorBody),
+    )
+)]
+async fn list_add_recipe(State(db): State<Db>, Path(id): Path<i64>, Json(r): Json<ListRecipe>) -> Result<Json<ShoppingList>, Error> {
+    Ok(Json(db.add_recipe_to_list(id, r.recipe_id, r.scale).await?))
+}
+
+#[derive(Deserialize, ToSchema)]
+struct ListBatch {
+    batch_id: i64,
+}
+
+#[utoipa::path(
+    post, path = "/api/shopping-lists/{id}/batches", params(("id" = i64, Path, description = "List id")), request_body = ListBatch,
+    responses(
+        (status = 200, description = "The list after the batch's actual amounts (substitute foods, added lines) were added or merged", body = ShoppingList),
+        (status = 404, description = "No such list or batch", body = ErrorBody),
+    )
+)]
+async fn list_add_batch(State(db): State<Db>, Path(id): Path<i64>, Json(b): Json<ListBatch>) -> Result<Json<ShoppingList>, Error> {
+    Ok(Json(db.add_batch_to_list(id, b.batch_id).await?))
+}
+
 /// What every handler can reach: the database and the content-addressed images dir.
 #[derive(Clone)]
 pub struct AppState {
@@ -317,6 +466,14 @@ pub fn router_with(state: AppState, import: ImportService) -> Router {
         // Axum's default body limit is 2 MB; the store enforces the real 10 MB (+ multipart framing).
         .route("/api/batches/{id}/photos", post(add_photo).layer(DefaultBodyLimit::max(PHOTO_BODY_LIMIT)))
         .route("/api/parse", post(parse))
+        .route("/api/meal-plan", get(get_plan).post(add_plan_entry))
+        .route("/api/meal-plan/{id}", put(put_plan_entry).delete(delete_plan_entry))
+        .route("/api/shopping-lists", get(get_lists).post(create_list))
+        .route("/api/shopping-lists/{id}", get(get_list))
+        .route("/api/shopping-lists/{id}/items", post(add_list_item))
+        .route("/api/shopping-list-items/{id}", put(put_item).delete(delete_item))
+        .route("/api/shopping-lists/{id}/recipes", post(list_add_recipe))
+        .route("/api/shopping-lists/{id}/batches", post(list_add_batch))
         .route("/api/openapi.json", get(openapi))
         .merge(crate::web::routes())
         .layer(Extension(Arc::new(import)))

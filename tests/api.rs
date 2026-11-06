@@ -231,6 +231,18 @@ async fn openapi_lists_every_recipe_route() {
         "POST /api/batches/{id}/finish",
         "POST /api/batches/{id}/photos",
         "POST /api/parse",
+        "GET /api/meal-plan",
+        "POST /api/meal-plan",
+        "PUT /api/meal-plan/{id}",
+        "DELETE /api/meal-plan/{id}",
+        "GET /api/shopping-lists",
+        "POST /api/shopping-lists",
+        "GET /api/shopping-lists/{id}",
+        "POST /api/shopping-lists/{id}/items",
+        "PUT /api/shopping-list-items/{id}",
+        "DELETE /api/shopping-list-items/{id}",
+        "POST /api/shopping-lists/{id}/recipes",
+        "POST /api/shopping-lists/{id}/batches",
     ];
     expected.sort();
     assert_eq!(found, expected);
@@ -506,4 +518,204 @@ async fn post_parse_returns_a_parsed_entry_per_line() {
              "original_text": "???", "confidence": "none"},
         ])
     );
+}
+
+// Meal plan and shopping list routes.
+
+/// A router with one recipe (id 1, 100 g flour) and one shopping list (id 1).
+async fn planner_app() -> (Router, i64) {
+    let db = Db::open_memory().await.unwrap();
+    let g = db.add_unit("g", mealier::Dimension::Mass, Some(1.0)).await.unwrap();
+    let flour = db.add_food("flour").await.unwrap();
+    let ingredients = vec![mealier::IngredientInput { qty_min: Some(100.0), qty_max: Some(100.0), unit_id: Some(g), food_id: Some(flour), ..Default::default() }];
+    db.create_recipe(mealier::RecipeInput { name: "Bread".into(), ingredients, ..Default::default() }).await.unwrap();
+    db.create_list("Weekly").await.unwrap();
+    (router_for(db), flour)
+}
+
+fn entry_json(slot: &str) -> Value {
+    json!({"date": "2026-12-01", "slot": slot, "recipe_id": 1})
+}
+
+/// 404 with our JSON error body (a missing route is also a 404, with none).
+async fn assert_not_found(app: &Router, method: &str, uri: &str, body: Option<Value>) {
+    let (status, b) = send(app, method, uri, body).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(b["error"].as_str().is_some_and(|e| e.contains("not found")), "{b}");
+}
+
+#[tokio::test]
+async fn post_meal_plan_returns_201() {
+    let (app, _) = planner_app().await;
+    let (status, body) = send(&app, "POST", "/api/meal-plan", Some(entry_json("dinner"))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!((body["slot"].as_str(), body["recipe_id"].as_i64()), (Some("dinner"), Some(1)));
+}
+
+#[tokio::test]
+async fn post_meal_plan_with_unknown_slot_returns_422() {
+    let (app, _) = planner_app().await;
+    let (status, body) = send(&app, "POST", "/api/meal-plan", Some(entry_json("brunch"))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body["error"].as_str().unwrap().contains("slot"), "{body}");
+}
+
+#[tokio::test]
+async fn post_meal_plan_with_missing_recipe_returns_404() {
+    let (app, _) = planner_app().await;
+    assert_not_found(&app, "POST", "/api/meal-plan", Some(json!({"date": "2026-12-01", "slot": "dinner", "recipe_id": 99}))).await;
+}
+
+#[tokio::test]
+async fn get_meal_plan_returns_200_in_range_and_slot_order() {
+    let (app, _) = planner_app().await;
+    for slot in ["dinner", "breakfast"] {
+        send(&app, "POST", "/api/meal-plan", Some(entry_json(slot))).await;
+    }
+    send(&app, "POST", "/api/meal-plan", Some(json!({"date": "2026-12-09", "slot": "lunch", "title": "later"}))).await;
+    let (status, body) = send(&app, "GET", "/api/meal-plan?from=2026-12-01&to=2026-12-07", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let slots: Vec<_> = body.as_array().unwrap().iter().map(|e| e["slot"].as_str().unwrap()).collect();
+    assert_eq!(slots, ["breakfast", "dinner"]);
+}
+
+#[tokio::test]
+async fn get_meal_plan_without_a_range_returns_422() {
+    let (app, _) = planner_app().await;
+    let (status, _) = send(&app, "GET", "/api/meal-plan", None).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn put_meal_plan_returns_200() {
+    let (app, _) = planner_app().await;
+    send(&app, "POST", "/api/meal-plan", Some(entry_json("dinner"))).await;
+    let (status, body) = send(&app, "PUT", "/api/meal-plan/1", Some(entry_json("lunch"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["slot"], "lunch");
+}
+
+#[tokio::test]
+async fn put_meal_plan_missing_returns_404() {
+    let (app, _) = planner_app().await;
+    assert_not_found(&app, "PUT", "/api/meal-plan/9", Some(entry_json("lunch"))).await;
+}
+
+#[tokio::test]
+async fn delete_meal_plan_returns_204_then_404() {
+    let (app, _) = planner_app().await;
+    send(&app, "POST", "/api/meal-plan", Some(entry_json("dinner"))).await;
+    assert_eq!(send(&app, "DELETE", "/api/meal-plan/1", None).await.0, StatusCode::NO_CONTENT);
+    assert_not_found(&app, "DELETE", "/api/meal-plan/1", None).await;
+}
+
+#[tokio::test]
+async fn post_shopping_lists_returns_201() {
+    let (app, _) = planner_app().await;
+    let (status, body) = send(&app, "POST", "/api/shopping-lists", Some(json!({"name": "Party"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["name"], "Party");
+}
+
+#[tokio::test]
+async fn post_shopping_lists_with_empty_name_returns_422() {
+    let (app, _) = planner_app().await;
+    let (status, _) = send(&app, "POST", "/api/shopping-lists", Some(json!({"name": " "}))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn get_shopping_lists_returns_200() {
+    let (app, _) = planner_app().await;
+    let (status, body) = send(&app, "GET", "/api/shopping-lists", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["name"], "Weekly");
+}
+
+#[tokio::test]
+async fn get_shopping_list_returns_200_with_items() {
+    let (app, flour) = planner_app().await;
+    send(&app, "POST", "/api/shopping-lists/1/items", Some(json!({"qty": 2, "food_id": flour}))).await;
+    let (status, body) = send(&app, "GET", "/api/shopping-lists/1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!((body["name"].as_str(), body["items"].as_array().map(Vec::len)), (Some("Weekly"), Some(1)));
+}
+
+#[tokio::test]
+async fn get_shopping_list_missing_returns_404() {
+    let (app, _) = planner_app().await;
+    assert_not_found(&app, "GET", "/api/shopping-lists/9", None).await;
+}
+
+#[tokio::test]
+async fn post_item_returns_201() {
+    let (app, flour) = planner_app().await;
+    let (status, body) = send(&app, "POST", "/api/shopping-lists/1/items", Some(json!({"qty": 2, "food_id": flour}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!((body["qty"].as_f64(), body["checked"].as_bool()), (Some(2.0), Some(false)));
+}
+
+#[tokio::test]
+async fn post_item_with_nothing_to_buy_returns_422() {
+    let (app, _) = planner_app().await;
+    assert_eq!(send(&app, "POST", "/api/shopping-lists/1/items", Some(json!({}))).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn post_item_on_a_missing_list_returns_404() {
+    let (app, _) = planner_app().await;
+    assert_not_found(&app, "POST", "/api/shopping-lists/9/items", Some(json!({"note": "x"}))).await;
+}
+
+#[tokio::test]
+async fn put_item_returns_200_and_can_check_it() {
+    let (app, _) = planner_app().await;
+    send(&app, "POST", "/api/shopping-lists/1/items", Some(json!({"note": "milk"}))).await;
+    let (status, body) = send(&app, "PUT", "/api/shopping-list-items/1", Some(json!({"note": "milk", "checked": true}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["checked"], true);
+}
+
+#[tokio::test]
+async fn put_item_missing_returns_404() {
+    let (app, _) = planner_app().await;
+    assert_not_found(&app, "PUT", "/api/shopping-list-items/9", Some(json!({"note": "x"}))).await;
+}
+
+#[tokio::test]
+async fn delete_item_returns_204_then_404() {
+    let (app, _) = planner_app().await;
+    send(&app, "POST", "/api/shopping-lists/1/items", Some(json!({"note": "milk"}))).await;
+    assert_eq!(send(&app, "DELETE", "/api/shopping-list-items/1", None).await.0, StatusCode::NO_CONTENT);
+    assert_not_found(&app, "DELETE", "/api/shopping-list-items/1", None).await;
+}
+
+#[tokio::test]
+async fn post_list_recipes_returns_200_with_scaled_items() {
+    let (app, _) = planner_app().await;
+    let (status, body) = send(&app, "POST", "/api/shopping-lists/1/recipes", Some(json!({"recipe_id": 1, "scale": 2}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!((body["items"][0]["qty"].as_f64(), body["items"][0]["recipe_id"].as_i64()), (Some(200.0), Some(1)));
+}
+
+#[tokio::test]
+async fn post_list_recipes_errors_return_404_and_422() {
+    let (app, _) = planner_app().await;
+    assert_not_found(&app, "POST", "/api/shopping-lists/1/recipes", Some(json!({"recipe_id": 9, "scale": 1}))).await;
+    assert_eq!(send(&app, "POST", "/api/shopping-lists/1/recipes", Some(json!({"recipe_id": 1, "scale": 0}))).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn post_list_batches_returns_200_with_the_batch_amounts() {
+    let (app, _) = planner_app().await;
+    send(&app, "POST", "/api/recipes/1/batches", Some(json!({"scale": 3}))).await;
+    let (status, body) = send(&app, "POST", "/api/shopping-lists/1/batches", Some(json!({"batch_id": 1}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"][0]["qty"].as_f64(), Some(300.0));
+}
+
+#[tokio::test]
+async fn post_list_batches_missing_batch_returns_404() {
+    let (app, _) = planner_app().await;
+    assert_not_found(&app, "POST", "/api/shopping-lists/1/batches", Some(json!({"batch_id": 9}))).await;
 }

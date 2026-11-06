@@ -36,6 +36,20 @@ th, td { text-align: left; padding: .4rem .3rem; border-bottom: 1px solid var(--
   .actual { white-space: normal; }
 }
 
+/* Plan and lists */
+.stack { display: flex; flex-direction: column; gap: .5rem; align-items: flex-start; margin: .5rem 0; }
+.stack label { margin: 0; flex-wrap: wrap; }
+form.inline { display: inline; }
+button.quiet { background: none; color: var(--muted); border-color: var(--line); padding: .1rem .5rem; font-size: .85rem; }
+.weeknav { display: flex; justify-content: space-between; gap: .5rem; flex-wrap: wrap; }
+.day { border-top: 1px solid var(--line); }
+.entries, .items { list-style: none; padding: 0; margin: 0; }
+.entries li, .items li { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; padding: .3rem 0; }
+.items li label { margin: 0; min-height: 2.5rem; }
+.items input[type=checkbox] { width: 1.5rem; height: 1.5rem; accent-color: var(--accent); }
+.items input:checked + span { text-decoration: line-through; color: var(--muted); }
+details summary { cursor: pointer; color: var(--accent); }
+
 /* Cook mode */
 .cook { font-size: 1.6rem; line-height: 1.5; }
 .cook main { max-width: 44rem; }

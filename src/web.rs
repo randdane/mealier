@@ -30,6 +30,16 @@ pub(crate) fn routes() -> Router<AppState> {
             "/batches/{id}/photo",
             post(photo).layer(axum::extract::DefaultBodyLimit::max(PHOTO_BODY_LIMIT)),
         )
+        .route("/plan", get(plan_page))
+        .route("/plan/entries", post(plan_add))
+        .route("/plan/entries/{id}/delete", post(plan_delete))
+        .route("/lists", get(lists_page).post(lists_create))
+        .route("/lists/{id}", get(list_page))
+        .route("/lists/{id}/items", post(list_add_item))
+        .route("/lists/add-recipe", post(list_add_recipe))
+        .route("/lists/add-batch", post(list_add_batch))
+        .route("/lists/items/{id}/check", post(item_check))
+        .route("/lists/items/{id}/delete", post(item_delete))
         .route("/images/{name}", get(image))
         .route("/static/htmx.min.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript")], include_str!("../static/htmx.min.js")) }))
         .route("/static/app.css", get(|| async { ([(header::CONTENT_TYPE, "text/css")], include_str!("../static/app.css")) }))
@@ -85,6 +95,9 @@ struct BatchRow {
 #[template(path = "recipe.html")]
 struct RecipePage {
     id: i64,
+    lists: Vec<crate::ShoppingListSummary>,
+    slots: [&'static str; 7],
+    today: String,
     name: String,
     description: String,
     ingredients: Vec<String>,
@@ -107,7 +120,7 @@ async fn recipe_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<Recipe
             rating: b.rating.map(|r| r.to_string()).unwrap_or_default(),
         })
         .collect();
-    Ok(RecipePage { id, name: r.content.name, description: r.content.description, ingredients, steps: r.content.steps, batches })
+    Ok(RecipePage { id, lists: db.shopping_lists().await?, slots: crate::SLOTS, today: db.day("now", 0).await?, name: r.content.name, description: r.content.description, ingredients, steps: r.content.steps, batches })
 }
 
 /// One ingredient as text, amounts times `scale`; falls back to the original text.
@@ -248,6 +261,7 @@ struct BatchPage {
     units: Vec<crate::Unit>,
     foods: Vec<crate::Food>,
     photos: Vec<String>,
+    lists: Vec<crate::ShoppingListSummary>,
 }
 
 async fn batch_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<BatchPage> {
@@ -283,6 +297,7 @@ async fn batch_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<BatchPa
         units: db.units().await?,
         foods,
         photos: b.photos.iter().map(|p| p.file_name()).collect(),
+        lists: db.shopping_lists().await?,
     })
 }
 
@@ -632,4 +647,254 @@ async fn review_save(State(db): State<Db>, Path(id): Path<i64>, body: axum::body
     )
     .await?;
     Ok(Redirect::to(&format!("/recipes/{id}")))
+}
+
+// Meal plan and shopping lists.
+
+impl Db {
+    /// `date(base, '+n days')`; `base` may be "now". Errors when `base` is not a date.
+    async fn day(&self, base: &str, n: i64) -> Result<String> {
+        let d: Option<String> = sqlx::query_scalar("SELECT date(?, ? || ' days')").bind(base).bind(n).fetch_one(&self.pool).await?;
+        d.ok_or_else(|| Error::Validation("date must be YYYY-MM-DD".into()))
+    }
+
+    /// The Monday of the week holding `d`.
+    async fn monday(&self, d: &str) -> Result<String> {
+        let m: Option<String> = sqlx::query_scalar("SELECT date(?, '-6 days', 'weekday 1')").bind(d).fetch_one(&self.pool).await?;
+        m.ok_or_else(|| Error::Validation("date must be YYYY-MM-DD".into()))
+    }
+}
+
+struct EntryRow {
+    id: i64,
+    slot: String,
+    label: String,
+    recipe_id: i64,
+    batch_id: i64,
+    text: String,
+}
+
+struct DayRow {
+    date: String,
+    name: String,
+    entries: Vec<EntryRow>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "plan.html")]
+struct PlanPage {
+    week: String,
+    prev: String,
+    next: String,
+    days: Vec<DayRow>,
+    recipes: Vec<crate::RecipeSummary>,
+    slots: [&'static str; 7],
+}
+
+#[derive(Deserialize)]
+struct WeekQuery {
+    week: Option<String>,
+}
+
+async fn plan_page(State(db): State<Db>, Query(q): Query<WeekQuery>) -> Result<PlanPage> {
+    let week = db.monday(&q.week.unwrap_or_else(|| "now".into())).await?;
+    let end = db.day(&week, 6).await?;
+    let recipes = db.list_recipes(true, None).await?;
+    let entries = db.meal_plan(&week, &end).await?;
+    let mut days = Vec::new();
+    for n in 0..7 {
+        let date = db.day(&week, n).await?;
+        let name: String = sqlx::query_scalar("SELECT strftime('%a %d %b', ?)").bind(&date).fetch_one(&db.pool).await?;
+        let entries = entries
+            .iter()
+            .filter(|e| e.date == date)
+            .map(|e| EntryRow {
+                id: e.id,
+                slot: e.slot.clone(),
+                label: match e.recipe_id.and_then(|r| recipes.iter().find(|x| x.id == r)) {
+                    Some(r) => r.name.clone(),
+                    None => e.title.clone(),
+                },
+                recipe_id: e.recipe_id.unwrap_or(0),
+                batch_id: e.batch_id.unwrap_or(0),
+                text: e.text.clone(),
+            })
+            .collect();
+        days.push(DayRow { date, name, entries });
+    }
+    Ok(PlanPage { prev: db.day(&week, -7).await?, next: db.day(&week, 7).await?, week, days, recipes: recipes.into_iter().filter(|r| !r.archived).collect(), slots: crate::SLOTS })
+}
+
+#[derive(Deserialize)]
+struct PlanForm {
+    date: String,
+    slot: String,
+    recipe_id: Option<String>,
+    #[serde(default)]
+    title: String,
+    /// Set: start a batch at this scale and attach it.
+    #[serde(default)]
+    scale: String,
+}
+
+async fn plan_add(State(db): State<Db>, axum::Form(f): axum::Form<PlanForm>) -> Result<Redirect> {
+    let recipe_id = id_of(f.recipe_id.as_deref().unwrap_or_default())?;
+    let batch_id = match (recipe_id, number(&f.scale)?) {
+        (Some(r), Some(scale)) => Some(db.start_batch(r, scale).await?.batch.id),
+        _ => None,
+    };
+    db.add_entry(crate::EntryInput { date: f.date.clone(), slot: f.slot, recipe_id, title: f.title, batch_id, ..Default::default() }).await?;
+    Ok(Redirect::to(&format!("/plan?week={}", db.monday(&f.date).await?)))
+}
+
+#[derive(Deserialize)]
+struct WeekForm {
+    week: String,
+}
+
+async fn plan_delete(State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<WeekForm>) -> Result<Redirect> {
+    db.delete_entry(id).await?;
+    Ok(Redirect::to(&format!("/plan?week={}", db.monday(&f.week).await?)))
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "lists.html")]
+struct ListsPage {
+    lists: Vec<crate::ShoppingListSummary>,
+}
+
+async fn lists_page(State(db): State<Db>) -> Result<ListsPage> {
+    Ok(ListsPage { lists: db.shopping_lists().await? })
+}
+
+#[derive(Deserialize)]
+struct NameForm {
+    name: String,
+}
+
+async fn lists_create(State(db): State<Db>, axum::Form(f): axum::Form<NameForm>) -> Result<Redirect> {
+    Ok(Redirect::to(&format!("/lists/{}", db.create_list(&f.name).await?.id)))
+}
+
+struct ItemRow {
+    id: i64,
+    checked: bool,
+    text: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "list.html")]
+struct ListPage {
+    id: i64,
+    name: String,
+    items: Vec<ItemRow>,
+    units: Vec<crate::Unit>,
+}
+
+async fn list_page(State(db): State<Db>, Path(id): Path<i64>) -> Result<ListPage> {
+    let list = db.shopping_list(id).await?;
+    let (units, foods) = (db.units().await?, db.foods().await?);
+    let items = list
+        .items
+        .iter()
+        .map(|i| {
+            let unit = i.unit_id.and_then(|u| units.iter().find(|x| x.id == u)).map(|u| u.name.as_str());
+            let food = i.food_id.and_then(|f| foods.iter().find(|x| x.id == f)).map(|f| f.name.as_str());
+            let text = [amount(i.qty, i.qty_max, unit), food.unwrap_or_default().to_string(), i.note.clone()];
+            ItemRow { id: i.id, checked: i.checked, text: text.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" ") }
+        })
+        .collect();
+    Ok(ListPage { id, name: list.name, items, units })
+}
+
+#[derive(Deserialize)]
+struct ItemForm {
+    #[serde(default)]
+    qty: String,
+    #[serde(default)]
+    unit_id: String,
+    /// A food's name or alias; anything else is kept as a note.
+    #[serde(default)]
+    item: String,
+}
+
+async fn list_add_item(State(db): State<Db>, Path(id): Path<i64>, axum::Form(f): axum::Form<ItemForm>) -> Result<Redirect> {
+    let wanted = f.item.trim().to_lowercase();
+    let food = db.foods().await?.into_iter().find(|x| std::iter::once(&x.name).chain(&x.aliases).any(|n| n.to_lowercase() == wanted));
+    let input = crate::ItemInput {
+        qty: number(&f.qty)?,
+        unit_id: id_of(&f.unit_id)?,
+        note: if food.is_some() { String::new() } else { f.item.trim().to_string() },
+        food_id: food.map(|x| x.id),
+        ..Default::default()
+    };
+    db.add_item(id, input).await?;
+    Ok(Redirect::to(&format!("/lists/{id}")))
+}
+
+#[derive(Deserialize)]
+struct AddToList {
+    /// Existing list; ignored when `new_list` is filled in.
+    #[serde(default)]
+    list_id: String,
+    #[serde(default)]
+    new_list: String,
+    recipe_id: Option<i64>,
+    batch_id: Option<i64>,
+    #[serde(default)]
+    scale: String,
+}
+
+async fn target_list(db: &Db, f: &AddToList) -> Result<i64> {
+    if !f.new_list.trim().is_empty() {
+        return Ok(db.create_list(&f.new_list).await?.id);
+    }
+    id_of(&f.list_id)?.ok_or_else(|| Error::Validation("choose a list or name a new one".into()))
+}
+
+async fn list_add_recipe(State(db): State<Db>, axum::Form(f): axum::Form<AddToList>) -> Result<Redirect> {
+    let list = target_list(&db, &f).await?;
+    let recipe = f.recipe_id.ok_or(Error::Validation("recipe_id is required".into()))?;
+    db.add_recipe_to_list(list, recipe, number(&f.scale)?.unwrap_or(1.0)).await?;
+    Ok(Redirect::to(&format!("/lists/{list}")))
+}
+
+async fn list_add_batch(State(db): State<Db>, axum::Form(f): axum::Form<AddToList>) -> Result<Redirect> {
+    let list = target_list(&db, &f).await?;
+    db.add_batch_to_list(list, f.batch_id.ok_or(Error::Validation("batch_id is required".into()))?).await?;
+    Ok(Redirect::to(&format!("/lists/{list}")))
+}
+
+#[derive(Deserialize)]
+struct CheckForm {
+    /// A checkbox: present when ticked.
+    checked: Option<String>,
+}
+
+/// htmx gets 204 (the box already shows the state); a plain form post gets a redirect.
+async fn item_check(
+    State(db): State<Db>,
+    Path(id): Path<i64>,
+    headers: axum::http::HeaderMap,
+    axum::Form(f): axum::Form<CheckForm>,
+) -> Result<axum::response::Response> {
+    db.set_item_checked(id, f.checked.is_some()).await?;
+    if headers.contains_key("hx-request") {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    Ok(back_to_list(&db, id).await.into_response())
+}
+
+async fn item_delete(State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
+    let list = list_of(&db, id).await?;
+    db.delete_item(id).await?;
+    Ok(Redirect::to(&format!("/lists/{list}")))
+}
+
+async fn list_of(db: &Db, item: i64) -> Result<i64> {
+    sqlx::query_scalar("SELECT list_id FROM shopping_list_items WHERE id = ?").bind(item).fetch_optional(&db.pool).await?.ok_or(Error::NotFound("shopping list item"))
+}
+
+async fn back_to_list(db: &Db, item: i64) -> Redirect {
+    Redirect::to(&format!("/lists/{}", list_of(db, item).await.unwrap_or(0)))
 }

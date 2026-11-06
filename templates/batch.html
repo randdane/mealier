@@ -55,6 +55,14 @@
   </div>
 </form>
 
+<h2>Shopping list</h2>
+<form method="post" action="/lists/add-batch" class="stack">
+  <input type="hidden" name="batch_id" value="{{ id }}">
+  <label>List <select name="list_id"><option value="">(choose)</option>{% for l in lists %}<option value="{{ l.id }}">{{ l.name }}</option>{% endfor %}</select></label>
+  <label>or new <input type="text" name="new_list" placeholder="New list name"></label>
+  <button type="submit">Add to shopping list</button>
+</form>
+
 <h2>Photos</h2>
 <div class="photos">
 {% for p in photos %}<a href="/images/{{ p }}"><img src="/images/{{ p }}" alt="Photo of the batch" loading="lazy"></a>{% endfor %}

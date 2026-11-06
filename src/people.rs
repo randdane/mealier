@@ -47,7 +47,7 @@ pub struct Batch {
     pub notes: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct MealPlanEntry {
     pub id: i64,
     pub date: String,
@@ -58,16 +58,18 @@ pub struct MealPlanEntry {
     pub batch_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct ShoppingListSummary {
     pub id: i64,
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct ShoppingItem {
     pub id: i64,
     pub qty: Option<f64>,
+    /// Equal to `qty` unless the amount is a range.
+    pub qty_max: Option<f64>,
     pub unit_id: Option<i64>,
     pub food_id: Option<i64>,
     pub note: String,
@@ -75,7 +77,7 @@ pub struct ShoppingItem {
     pub recipe_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct ShoppingList {
     pub id: i64,
     pub name: String,
@@ -200,11 +202,13 @@ impl Db {
         Ok(rows.iter().map(|r| Comment { user_id: r.get(0), text: r.get(1), created_at: r.get(2) }).collect())
     }
 
-    /// Entries with `from <= date <= to` (YYYY-MM-DD), by date.
+    /// Entries with `from <= date <= to` (YYYY-MM-DD), by date then slot (`SLOTS` order; unknown imported slots last).
     pub async fn meal_plan(&self, from: &str, to: &str) -> Result<Vec<MealPlanEntry>> {
         let rows = sqlx::query(
             "SELECT id, date, slot, recipe_id, title, text, batch_id FROM meal_plan_entries
-             WHERE date BETWEEN ? AND ? ORDER BY date, id",
+             WHERE date BETWEEN ? AND ?
+             ORDER BY date, CASE slot WHEN 'breakfast' THEN 0 WHEN 'lunch' THEN 1 WHEN 'dinner' THEN 2 WHEN 'side' THEN 3
+                                      WHEN 'snack' THEN 4 WHEN 'dessert' THEN 5 WHEN 'drink' THEN 6 ELSE 7 END, id",
         )
         .bind(from)
         .bind(to)
@@ -235,7 +239,7 @@ impl Db {
             .fetch_optional(&self.pool)
             .await?
             .ok_or(Error::NotFound("shopping list"))?;
-        let rows = sqlx::query("SELECT id, qty, unit_id, food_id, note, checked, recipe_id FROM shopping_list_items WHERE list_id = ? ORDER BY id")
+        let rows = sqlx::query("SELECT id, qty, COALESCE(qty_max, qty), unit_id, food_id, note, checked, recipe_id FROM shopping_list_items WHERE list_id = ? ORDER BY id")
             .bind(id)
             .fetch_all(&self.pool)
             .await?;
@@ -244,11 +248,12 @@ impl Db {
             .map(|r| ShoppingItem {
                 id: r.get(0),
                 qty: r.get(1),
-                unit_id: r.get(2),
-                food_id: r.get(3),
-                note: r.get(4),
-                checked: r.get(5),
-                recipe_id: r.get(6),
+                qty_max: r.get(2),
+                unit_id: r.get(3),
+                food_id: r.get(4),
+                note: r.get(5),
+                checked: r.get(6),
+                recipe_id: r.get(7),
             })
             .collect();
         Ok(ShoppingList { id, name, items })

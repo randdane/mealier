@@ -69,7 +69,7 @@ pub struct BatchInput {
 const MAX_PHOTOS: i64 = 5;
 const MAX_PHOTO_BYTES: usize = 10 * 1024 * 1024;
 
-fn check_scale(scale: f64) -> Result<()> {
+pub(crate) fn check_scale(scale: f64) -> Result<()> {
     if scale.is_finite() && scale > 0.0 {
         return Ok(());
     }

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Shopping lists - mealier{% endblock %}
+{% block content %}
+<h1>Shopping lists</h1>
+<ul>
+{% for l in lists %}<li><a href="/lists/{{ l.id }}">{{ l.name }}</a></li>{% else %}<li>None yet.</li>{% endfor %}
+</ul>
+<form method="post" action="/lists" class="inline">
+  <input type="text" name="name" placeholder="New list" aria-label="New list name" required>
+  <button type="submit">Create</button>
+</form>
+{% endblock %}

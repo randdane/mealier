@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} - mealier{% endblock %}
+{% block content %}
+<h1>{{ name }}</h1>
+<ul class="items">
+{% for i in items %}
+  <li>
+    <form method="post" action="/lists/items/{{ i.id }}/check" class="inline">
+      <label><input type="checkbox" name="checked" value="1"{% if i.checked %} checked{% endif %}
+             hx-post="/lists/items/{{ i.id }}/check" hx-trigger="change" hx-swap="none"><span>{{ i.text }}</span></label>
+      <noscript><button type="submit">Save</button></noscript>
+    </form>
+    <form method="post" action="/lists/items/{{ i.id }}/delete" class="inline"><button type="submit" class="quiet" aria-label="Delete {{ i.text }}">Delete</button></form>
+  </li>
+{% else %}
+  <li>Nothing on this list.</li>
+{% endfor %}
+</ul>
+
+<h2>Add an item</h2>
+<form method="post" action="/lists/{{ id }}/items" class="stack">
+  <label>Amount <input type="number" name="qty" step="any" min="0" inputmode="decimal"></label>
+  <label>Unit
+    <select name="unit_id"><option value="">(none)</option>{% for u in units %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}</select>
+  </label>
+  <label>Item <input type="text" name="item" required></label>
+  <button type="submit">Add</button>
+</form>
+<p><a href="/lists">All lists</a></p>
+{% endblock %}

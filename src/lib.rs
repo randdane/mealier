@@ -6,6 +6,7 @@ pub mod fetch;
 mod import;
 mod parse;
 mod people;
+mod planner;
 mod recipes;
 mod units;
 mod urlimport;
@@ -14,6 +15,7 @@ pub use batches::*;
 pub use import::*;
 pub use parse::*;
 pub use people::*;
+pub use planner::*;
 pub use recipes::*;
 pub use urlimport::*;
 

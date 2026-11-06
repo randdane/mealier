@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Meal plan - mealier{% endblock %}
+{% block content %}
+<h1>Meal plan</h1>
+<p class="weeknav"><a href="/plan?week={{ prev }}">&larr; Previous</a> <strong>Week of {{ week }}</strong> <a href="/plan?week={{ next }}">Next &rarr;</a></p>
+
+{% for d in days %}
+<section class="day">
+  <h2>{{ d.name }}</h2>
+  <ul class="entries">
+  {% for e in d.entries %}
+    <li>
+      <span class="badge">{{ e.slot }}</span>
+      {% if e.recipe_id != 0 %}<a href="/recipes/{{ e.recipe_id }}">{{ e.label }}</a>{% else %}{{ e.label }}{% endif %}
+      {% if e.batch_id != 0 %}(<a href="/batches/{{ e.batch_id }}">batch</a>){% endif %}
+      {% if !e.text.is_empty() %}<small>{{ e.text }}</small>{% endif %}
+      <form method="post" action="/plan/entries/{{ e.id }}/delete" class="inline"><input type="hidden" name="week" value="{{ week }}"><button type="submit" class="quiet" aria-label="Remove from plan">Remove</button></form>
+    </li>
+  {% endfor %}
+  </ul>
+  <details>
+    <summary>Add</summary>
+    <form method="post" action="/plan/entries" class="stack">
+      <input type="hidden" name="date" value="{{ d.date }}">
+      <label>Meal
+        <select name="slot">{% for s in slots %}<option value="{{ s }}"{% if s == &"dinner" %} selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+      </label>
+      <label>Recipe
+        <select name="recipe_id"><option value="">(none, use a title)</option>{% for r in recipes %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select>
+      </label>
+      <label>Or title <input type="text" name="title" placeholder="Leftovers, eating out"></label>
+      <label>Plan a batch at scale <input type="number" name="scale" step="any" min="0" inputmode="decimal" placeholder="none"></label>
+      <button type="submit">Add</button>
+    </form>
+  </details>
+</section>
+{% endfor %}
+{% endblock %}
