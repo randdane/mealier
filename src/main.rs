@@ -25,15 +25,29 @@ fn hash_password_command() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    match std::env::args().nth(1).as_deref() {
-        Some("hash-password") => return hash_password_command(),
-        Some(other) => return Err(format!("unknown command '{other}' (only `hash-password` exists; the server takes no arguments)").into()),
-        None => {}
+/// `mealier healthcheck`: GET /healthz on loopback with a plain socket (the image has no shell or curl); exit 0 only on a 200.
+fn healthcheck_command() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+    use std::time::Duration;
+    let port = std::env::var("PORT").unwrap_or_else(|_| "9000".into());
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse()?;
+    let t = Duration::from_secs(3);
+    let mut s = std::net::TcpStream::connect_timeout(&addr, t)?;
+    s.set_read_timeout(Some(t))?;
+    s.set_write_timeout(Some(t))?;
+    s.write_all(b"GET /healthz HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")?;
+    let mut head = [0u8; 12];
+    s.read_exact(&mut head)?;
+    if &head == b"HTTP/1.0 200" || &head == b"HTTP/1.1 200" {
+        Ok(())
+    } else {
+        Err(format!("unhealthy: {}", String::from_utf8_lossy(&head)).into())
     }
-    // Container sets MEALIER_DATA_DIR; locally default to the XDG data dir, never the repo.
-    let dir = match std::env::var_os("MEALIER_DATA_DIR") {
+}
+
+/// Container sets MEALIER_DATA_DIR; locally default to the XDG data dir, never the repo.
+fn data_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    Ok(match std::env::var_os("MEALIER_DATA_DIR") {
         Some(d) => PathBuf::from(d),
         None => {
             let base = match std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
@@ -42,7 +56,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             base.join("_r_/mealier")
         }
-    };
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match std::env::args().nth(1).as_deref() {
+        Some("hash-password") => return hash_password_command(),
+        Some("healthcheck") => {
+            return healthcheck_command().map_err(|e| {
+                eprintln!("healthcheck: {e}");
+                std::process::exit(1)
+            });
+        }
+        Some("import-mealie") => {
+            let zip = std::env::args().nth(2).ok_or("usage: mealier import-mealie <backup.zip>")?;
+            let dir = data_dir()?;
+            std::fs::create_dir_all(&dir)?;
+            let db = Db::open(&dir.join("mealier.db")).await?;
+            let report = mealier::import_mealie_backup(&db, std::path::Path::new(&zip), &dir.join("images")).await?;
+            println!("{report:#?}");
+            return Ok(());
+        }
+        Some(other) => return Err(format!("unknown command '{other}' (commands: hash-password, healthcheck, import-mealie <zip>; the server takes no arguments)").into()),
+        None => {}
+    }
+    let dir = data_dir()?;
     std::fs::create_dir_all(&dir)?;
     let db = Db::open(&dir.join("mealier.db")).await?;
 
