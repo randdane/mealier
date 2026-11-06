@@ -2,17 +2,20 @@ use std::path::Path;
 
 pub mod api;
 mod batches;
+pub mod fetch;
 mod import;
 mod parse;
 mod people;
 mod recipes;
 mod units;
+mod urlimport;
 mod web;
 pub use batches::*;
 pub use import::*;
 pub use parse::*;
 pub use people::*;
 pub use recipes::*;
+pub use urlimport::*;
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};

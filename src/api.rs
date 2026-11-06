@@ -3,13 +3,14 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::extract::Path;
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
+use std::sync::Arc;
 
 use std::path::PathBuf;
 
 use axum::extract::FromRef;
 
-use crate::{Parsed, Batch, BatchDetail, BatchInput, BatchLineInput, Db, Error, Recipe, RecipeInput, RecipeSummary, Snapshot, SnapshotSummary};
+use crate::{ImportService, Parsed, Batch, BatchDetail, BatchInput, BatchLineInput, Db, Error, Recipe, RecipeInput, RecipeSummary, Snapshot, SnapshotSummary};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
@@ -22,7 +23,7 @@ pub struct ErrorBody {
 #[derive(OpenApi)]
 #[openapi(paths(
     create, list, get_one, update, archive, snapshots, get_snapshot,
-    start_batch, list_batches, get_batch, put_batch, add_line, finish_batch, add_photo, parse
+    start_batch, list_batches, get_batch, put_batch, add_line, finish_batch, add_photo, parse, import_url
 ))]
 struct ApiDoc;
 
@@ -264,6 +265,23 @@ async fn parse(State(db): State<Db>, Json(req): Json<ParseRequest>) -> Result<Js
     Ok(Json(req.lines.iter().map(|l| crate::parse_line(l, &units, &foods)).collect()))
 }
 
+#[derive(Deserialize, ToSchema)]
+struct ImportRequest {
+    /// http or https page to import a recipe from.
+    url: String,
+}
+
+#[utoipa::path(
+    post, path = "/api/recipes/import", request_body = ImportRequest,
+    responses(
+        (status = 201, description = "Recipe created from the page; its ingredient lines still need review", body = Recipe),
+        (status = 422, description = "The URL was refused, could not be fetched, or the page has no recipe", body = ErrorBody),
+    )
+)]
+async fn import_url(State(s): State<AppState>, Extension(svc): Extension<Arc<ImportService>>, Json(req): Json<ImportRequest>) -> Result<(StatusCode, Json<Recipe>), Error> {
+    Ok((StatusCode::CREATED, Json(svc.import(&s.db, &s.images_dir, &req.url).await?)))
+}
+
 /// What every handler can reach: the database and the content-addressed images dir.
 #[derive(Clone)]
 pub struct AppState {
@@ -280,7 +298,13 @@ impl FromRef<AppState> for Db {
 pub(crate) const PHOTO_BODY_LIMIT: usize = 11 * 1024 * 1024;
 
 pub fn router(state: AppState) -> Router {
+    router_with(state, ImportService::default())
+}
+
+/// `router` with a chosen import service (config from the environment, or a test fetcher).
+pub fn router_with(state: AppState, import: ImportService) -> Router {
     Router::new()
+        .route("/api/recipes/import", post(import_url))
         .route("/api/recipes", post(create).get(list))
         .route("/api/recipes/{id}", get(get_one).put(update))
         .route("/api/recipes/{id}/archive", post(archive))
@@ -295,5 +319,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/parse", post(parse))
         .route("/api/openapi.json", get(openapi))
         .merge(crate::web::routes())
+        .layer(Extension(Arc::new(import)))
         .with_state(state)
 }

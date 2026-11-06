@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use mealier::{Db, api};
+use mealier::{Db, ImportService, api};
 
 /// Resolves on ctrl-c or SIGTERM (the container stop signal).
 async fn shutdown() {
@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".into());
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
     eprintln!("mealier listening on {}", listener.local_addr()?);
-    axum::serve(listener, api::router(api::AppState { db, images_dir: dir.join("images") })).with_graceful_shutdown(shutdown()).await?;
+    let import = ImportService::from_env()?;
+    axum::serve(listener, api::router_with(api::AppState { db, images_dir: dir.join("images") }, import)).with_graceful_shutdown(shutdown()).await?;
     Ok(())
 }

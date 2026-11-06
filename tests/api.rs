@@ -217,6 +217,7 @@ async fn openapi_lists_every_recipe_route() {
     let mut expected = vec![
         "GET /api/recipes",
         "POST /api/recipes",
+        "POST /api/recipes/import",
         "GET /api/recipes/{id}",
         "PUT /api/recipes/{id}",
         "POST /api/recipes/{id}/archive",

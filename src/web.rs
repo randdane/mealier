@@ -15,6 +15,7 @@ pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(index))
         .route("/recipes", post(create_recipe))
+        .route("/recipes/import", post(import_form))
         .route("/recipes/new", get(new_recipe_page))
         .route("/recipes/{id}", get(recipe_page))
         .route("/recipes/{id}/edit", get(edit_recipe_page).post(edit_recipe))
@@ -425,7 +426,7 @@ struct RecipeFormData {
 }
 
 /// Parsed form of a line: what `parse_line` found, or just the text when it found nothing.
-fn parsed_input(text: &str, units: &[crate::Unit], foods: &[crate::Food]) -> IngredientInput {
+pub(crate) fn parsed_input(text: &str, units: &[crate::Unit], foods: &[crate::Food]) -> IngredientInput {
     // step 9: LLM fallback for unparsed lines
     let p = parse_line(text, units, foods);
     let keep = p.confidence != crate::Confidence::None;
@@ -437,6 +438,16 @@ fn parsed_input(text: &str, units: &[crate::Unit], foods: &[crate::Food]) -> Ing
         note: p.note,
         original_text: p.original_text,
     }
+}
+
+#[derive(Deserialize)]
+struct ImportForm {
+    url: String,
+}
+
+async fn import_form(State(s): State<AppState>, axum::Extension(svc): axum::Extension<std::sync::Arc<crate::ImportService>>, axum::Form(f): axum::Form<ImportForm>) -> Result<Redirect> {
+    let r = svc.import(&s.db, &s.images_dir, &f.url).await?;
+    Ok(Redirect::to(&format!("/recipes/{}/ingredients/review", r.id)))
 }
 
 async fn create_recipe(State(db): State<Db>, axum::Form(f): axum::Form<RecipeFormData>) -> Result<Redirect> {
