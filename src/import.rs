@@ -10,6 +10,8 @@ use sqlx::{Row, Sqlite, Transaction};
 use zip::ZipArchive;
 
 use crate::images::Processed;
+use crate::filter::{self, By, Filter, SetField};
+use crate::tenancy::{free_slug, slugify};
 use crate::units::KNOWN_UNITS;
 use crate::recipes::{IngredientInput, Nutrition, RecipeInput, insert_recipe};
 use crate::{Db, Dimension, Error, Result};
@@ -28,6 +30,7 @@ pub struct ImportReport {
     pub tags: usize,
     pub categories: usize,
     pub cookbooks: usize,
+    pub meal_plan_rules: usize,
     pub tools: usize,
     pub batches: usize,
     pub comments: usize,
@@ -173,6 +176,8 @@ pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Res
     import_recipes(&mut tx, &b, &images, &mut report).await?;
     import_history(&mut tx, &b, &mut report).await?;
     import_meal_plans(&mut tx, &b, &mut report).await?;
+    import_cookbooks(&mut tx, &b, &mut report).await?;
+    import_rules(&mut tx, &b, &mut report).await?;
     import_shopping(&mut tx, &b, &mut report).await?;
     let files = import_images(&mut tx, &images, &mut report).await?;
     if let Some(g) = home {
@@ -362,12 +367,8 @@ fn linked(b: &Backup, table: &str, key: &str, recipe: &str, names: &HashMap<Stri
 async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, images: &HashMap<String, Processed>, report: &mut ImportReport) -> Result<()> {
     let tags = vocabulary(tx, b, "tags", "tags", "tag").await?;
     let categories = vocabulary(tx, b, "categories", "categories", "category").await?;
-    let cookbooks = vocabulary(tx, b, "cookbooks", "cookbooks", "cookbook").await?;
     let tools = vocabulary(tx, b, "tools", "tools", "tool").await?;
-    (report.tags, report.categories, report.cookbooks, report.tools) = (tags.len(), categories.len(), cookbooks.len(), tools.len());
-    if !cookbooks.is_empty() {
-        report.skipped.push(format!("{} cookbooks are imported by name only: Mealie defines their recipes by a filter", cookbooks.len()));
-    }
+    (report.tags, report.categories, report.tools) = (tags.len(), categories.len(), tools.len());
 
     let mut dropped_nutrition = false;
     let mut dropped_titles = 0;
@@ -528,6 +529,151 @@ async fn import_meal_plans(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportRepor
             .execute(&mut **tx)
             .await?;
         report.meal_plan_entries += 1;
+    }
+    Ok(())
+}
+
+/// The first of `keys` the row has: Mealie's link tables name their owner column differently from version to version.
+fn owner<'a>(r: &'a MRow, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|k| s(r, k))
+}
+
+/// `tags.id IN ["a", "b"]` for the ids a legacy link table lists for `owner_id`; `None` when it lists none.
+fn link_clause(b: &Backup, table: &str, owner_keys: &[&str], owner_id: &str, child: &str, field: &str, all: bool) -> Option<String> {
+    let ids: Vec<String> = b.rows(table).into_iter().filter(|r| owner(r, owner_keys) == Some(owner_id)).filter_map(|r| s(r, child)).map(|c| format!("\"{c}\"")).collect();
+    (!ids.is_empty()).then(|| format!("{field} {} [{}]", if all { "CONTAINS ALL" } else { "IN" }, ids.join(", ")))
+}
+
+/// The filter as written, with legacy link clauses ANDed on; the parsed form of that, with Mealie's uuids
+/// turned into mealier ids; or, when it cannot be read, the string as written and `None` (with a report line).
+async fn read_stored_filter(tx: &mut Tx<'_>, written: &str, clauses: Vec<String>, group: i64, what: &str, report: &mut ImportReport) -> Result<(String, Option<String>)> {
+    let Err(e) = filter::parse(written) else {
+        let query = match (written.trim().is_empty(), clauses.is_empty()) {
+            (_, true) => written.to_string(),
+            (true, false) => clauses.join(" AND "),
+            (false, false) => format!("({written}) AND {}", clauses.join(" AND ")),
+        };
+        let mut parsed = filter::parse(&query).map_err(Error::from)?;
+        if let Some(f) = &mut parsed {
+            map_ids(tx, f, group, what, report).await?;
+        }
+        return Ok((query, parsed.as_ref().map(serde_json::to_string).transpose()?));
+    };
+    report.skipped.push(format!("{what}: {e}; kept as written, and it selects nothing"));
+    Ok((written.to_string(), None))
+}
+
+/// Replaces each Mealie uuid in an `.id` list with the mealier id it became. A uuid the backup does not
+/// hold becomes 0, which no row has (so it matches nothing, as in Mealie) and is reported; one that
+/// belongs to another group refuses the whole import.
+async fn map_ids(tx: &mut Tx<'_>, f: &mut Filter, group: i64, what: &str, report: &mut ImportReport) -> Result<()> {
+    let mut slots: Vec<(SetField, &mut String)> = Vec::new();
+    collect_ids(f, &mut slots);
+    for (field, value) in slots {
+        let (kind, table, noun) = match field {
+            SetField::Tags => ("tag", "tags", "tag"),
+            SetField::Categories => ("category", "categories", "category"),
+            SetField::Tools => ("tool", "tools", "tool"),
+        };
+        let uuid = value.replace('-', "").to_lowercase();
+        match sqlx::query_scalar::<_, i64>("SELECT local_id FROM import_ids WHERE kind = ? AND mealie_uuid = ?").bind(kind).bind(&uuid).fetch_optional(&mut **tx).await? {
+            Some(local) => {
+                same_group(tx, table, local, group, &format!("{what}'s {noun}")).await?;
+                *value = local.to_string();
+            }
+            None => {
+                report.skipped.push(format!("{what}: {noun} id {value} is not in the backup; it matches nothing"));
+                *value = "0".into();
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_ids<'a>(f: &'a mut Filter, out: &mut Vec<(SetField, &'a mut String)>) {
+    match f {
+        Filter::And(p) | Filter::Or(p) => p.iter_mut().for_each(|x| collect_ids(x, out)),
+        Filter::Set { field, by: By::Id, values, .. } => out.extend(values.iter_mut().map(|v| (*field, v))),
+        _ => {}
+    }
+}
+
+/// Cookbooks with their filters. Mealie 3 keeps the filter in `query_filter_string`; the older
+/// `cookbooks_to_*` link tables, if a backup still has rows in them, are ANDed on.
+async fn import_cookbooks(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
+    for c in b.rows("cookbooks") {
+        let (uuid, name) = (id(c, "id")?, id(c, "name")?);
+        let group = local(tx, "group", id(c, "group_id")?).await?;
+        let taken: Option<i64> = sqlx::query_scalar("SELECT id FROM cookbooks WHERE group_id = ? AND name = ?").bind(group).bind(name).fetch_optional(&mut **tx).await?;
+        if taken.is_some() {
+            report.skipped.push(format!("cookbook {name:?} appears twice; the second was not imported"));
+            continue;
+        }
+        let clauses: Vec<String> = [
+            link_clause(b, "cookbooks_to_tags", &["cookbook_id"], uuid, "tag_id", "tags.id", flag(c, "require_all_tags")),
+            link_clause(b, "cookbooks_to_categories", &["cookbook_id"], uuid, "category_id", "recipe_category.id", flag(c, "require_all_categories")),
+            link_clause(b, "cookbooks_to_tools", &["cookbook_id"], uuid, "tool_id", "tools.id", flag(c, "require_all_tools")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let (query, json) = read_stored_filter(tx, s(c, "query_filter_string").unwrap_or(""), clauses, group, &format!("cookbook {name:?}"), report).await?;
+        let slug = free_slug(tx, "cookbooks", Some(group), &slugify(s(c, "slug").filter(|x| !x.is_empty()).unwrap_or(name), "cookbook")).await?;
+        let lid = sqlx::query("INSERT INTO cookbooks (group_id, name, description, slug, position, public, query_filter, filter_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(group)
+            .bind(name)
+            .bind(s(c, "description").unwrap_or(""))
+            .bind(slug)
+            .bind(c.get("position").and_then(Value::as_i64).unwrap_or(1))
+            .bind(flag(c, "public"))
+            .bind(query)
+            .bind(json)
+            .execute(&mut **tx)
+            .await?
+            .last_insert_rowid();
+        remember(tx, "cookbook", uuid, lid).await?;
+        report.cookbooks += 1;
+    }
+    Ok(())
+}
+
+/// Meal-plan rules: day and meal, the filter (plus legacy tag and category links), and the households
+/// the rule is limited to. A day or meal mealier has no word for is reported and the rule left out.
+async fn import_rules(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
+    const RULE_KEYS: [&str; 3] = ["group_plan_rule_id", "plan_rule_id", "rule_id"];
+    for r in b.rows("group_meal_plan_rules") {
+        let uuid = id(r, "id")?;
+        let group = local(tx, "group", id(r, "group_id")?).await?;
+        let (day, slot) = (s(r, "day").unwrap_or("unset"), s(r, "entry_type").unwrap_or("unset"));
+        let label = format!("meal-plan rule ({day} {slot})");
+        if day != "unset" && !crate::DAYS.contains(&day) || slot != "unset" && !crate::SLOTS.contains(&slot) {
+            report.skipped.push(format!("{label}: mealier has no such day or meal; the rule was not imported"));
+            continue;
+        }
+        let clauses: Vec<String> = [
+            link_clause(b, "plan_rules_to_tags", &RULE_KEYS, uuid, "tag_id", "tags.id", false),
+            link_clause(b, "plan_rules_to_categories", &RULE_KEYS, uuid, "category_id", "recipe_category.id", false),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let (query, json) = read_stored_filter(tx, s(r, "query_filter_string").unwrap_or(""), clauses, group, &label, report).await?;
+        let lid = sqlx::query("INSERT INTO meal_plan_rules (group_id, day, slot, query_filter, filter_json) VALUES (?, ?, ?, ?, ?)")
+            .bind(group)
+            .bind(day)
+            .bind(slot)
+            .bind(query)
+            .bind(json)
+            .execute(&mut **tx)
+            .await?
+            .last_insert_rowid();
+        for h in b.rows("plan_rules_to_households").into_iter().filter(|h| owner(h, &RULE_KEYS) == Some(uuid)) {
+            let household = local(tx, "household", id(h, "household_id")?).await?;
+            same_group(tx, "households", household, group, "meal-plan rule's household").await?;
+            sqlx::query("INSERT OR IGNORE INTO meal_plan_rule_households (rule_id, household_id) VALUES (?, ?)").bind(lid).bind(household).execute(&mut **tx).await?;
+        }
+        remember(tx, "meal_plan_rule", uuid, lid).await?;
+        report.meal_plan_rules += 1;
     }
     Ok(())
 }

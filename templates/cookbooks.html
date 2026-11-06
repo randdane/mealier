@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Cookbooks - mealier{% endblock %}
+{% block content %}
+<h1>Cookbooks</h1>
+<p><small>A cookbook is a saved filter: it lists whichever of the group's recipes match, now. Shared by every household in the group.</small></p>
+<ul>
+{% for c in books %}
+  <li><a href="/cookbooks/{{ c.id }}">{{ c.name }}</a>{% if !c.supported %} <small>(filter not supported)</small>{% endif %}</li>
+{% else %}
+  <li>No cookbooks yet.</li>
+{% endfor %}
+</ul>
+
+<h2>New cookbook</h2>
+<form method="post" action="/cookbooks" class="stack">
+  <label class="block">Name <input type="text" name="name" required></label>
+  <label class="block">Description <input type="text" name="description"></label>
+  <label class="block">Filter (optional; pick tags, categories and tools on the edit page) <input type="text" name="query_filter" placeholder='tags.name IN ["quick"]'></label>
+  <button type="submit">Create cookbook</button>
+</form>
+{% endblock %}

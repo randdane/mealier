@@ -30,7 +30,9 @@ pub struct ErrorBody {
     crate::backup::download, crate::backup::restore_api,
     crate::login::me, crate::login::list_users, crate::login::disable_user, crate::login::enable_user,
     crate::households::list_groups, crate::households::create_group, crate::households::list_households, crate::households::create_household,
-    crate::households::get_default, crate::households::put_default, crate::households::move_user
+    crate::households::get_default, crate::households::put_default, crate::households::move_user,
+    crate::cookbooks::list_cookbooks, crate::cookbooks::create_cookbook, crate::cookbooks::get_cookbook, crate::cookbooks::put_cookbook, crate::cookbooks::delete_cookbook_route, crate::cookbooks::cookbook_recipes_route,
+    crate::rules::list_rules, crate::rules::create_rule, crate::rules::get_rule, crate::rules::put_rule, crate::rules::delete_rule_route, crate::rules::suggest_route
 ), modifiers(&BearerScheme), security(("bearer" = [])))]
 struct ApiDoc;
 
@@ -664,6 +666,8 @@ pub fn router_with_restart(state: AppState, import: ImportService, auth: crate::
         .merge(crate::web::routes())
         .merge(crate::login::routes())
         .merge(crate::households::routes())
+        .merge(crate::cookbooks::routes())
+        .merge(crate::rules::routes())
         .merge(crate::backup::routes())
         .layer(Extension(restart))
         .layer(Extension(Arc::new(import)))

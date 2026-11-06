@@ -9,7 +9,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
-use mealier::{AuthConfig, Db, Dimension, EntryInput, ImportService, IngredientInput, ItemInput, LabelInput, RecipeInput, api, hash_password};
+use mealier::{AuthConfig, CookbookInput, Db, Dimension, EntryInput, ImportService, IngredientInput, ItemInput, LabelInput, RecipeInput, RuleInput, api, hash_password};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -90,6 +90,8 @@ struct Ids {
     unit: i64,
     food: i64,
     label: i64,
+    cookbook: i64,
+    rule: i64,
 }
 
 async fn world() -> World {
@@ -109,9 +111,11 @@ async fn world() -> World {
     let list = db.create_list(&t.a, "Weekly-secret").await.unwrap();
     let item = db.add_item(&t.a, list.id, ItemInput { note: "milk".into(), ..Default::default() }).await.unwrap();
     let label = db.add_label(&t.a, LabelInput { name: "Produce".into(), color: "#00aa00".into() }).await.unwrap();
+    let cookbook = db.add_cookbook(&t.a, CookbookInput { name: "Secret-book".into(), query_filter: String::new(), ..Default::default() }).await.unwrap();
+    let rule = db.add_rule(&t.a, RuleInput { day: "monday".into(), household_ids: vec![t.a.household_id], ..Default::default() }).await.unwrap();
     let images = tempfile::tempdir().unwrap().keep();
     let app = api::router(api::AppState { db: db.clone(), images_dir: images.clone() });
-    let ids = Ids { recipe: recipe.id, snapshot: recipe.current_snapshot_id, batch: b.batch.id, line: b.lines[0].id, entry: entry.id, list: list.id, item: item.id, unit, food, label: label.id };
+    let ids = Ids { recipe: recipe.id, snapshot: recipe.current_snapshot_id, batch: b.batch.id, line: b.lines[0].id, entry: entry.id, list: list.id, item: item.id, unit, food, label: label.id, cookbook: cookbook.id, rule: rule.id };
     World { app, db, t, images, alice, bob, carol, ids }
 }
 
@@ -127,6 +131,8 @@ impl World {
             .replace("{item}", &i.item.to_string())
             .replace("{food}", &i.food.to_string())
             .replace("{label}", &i.label.to_string())
+            .replace("{cookbook}", &i.cookbook.to_string())
+            .replace("{rule}", &i.rule.to_string())
     }
 
     /// Everything the tenants own, as text: if an outsider's request changed anything, this changes.
@@ -145,6 +151,9 @@ impl World {
             "SELECT json_group_array(json_array(id, group_id, name, label_id)) FROM foods",
             "SELECT json_group_array(json_array(id, group_id, name, color)) FROM labels",
             "SELECT json_group_array(json_array(list_id, label_id, position)) FROM shopping_list_labels",
+            "SELECT json_group_array(json_array(id, group_id, name, description, slug, position, public, query_filter, filter_json)) FROM cookbooks",
+            "SELECT json_group_array(json_array(id, group_id, day, slot, query_filter, filter_json)) FROM meal_plan_rules",
+            "SELECT json_group_array(json_array(rule_id, household_id)) FROM meal_plan_rule_households",
         ] {
             let s: String = sqlx::query_scalar(sql).fetch_one(self.db.pool()).await.unwrap();
             out.push_str(&s);
@@ -205,6 +214,13 @@ fn api_routes() -> Vec<Route> {
         r("DELETE", "/api/labels/{label}", Spent, none, 204),
         r("PUT", "/api/foods/{food}/label", Group, |_| Req::Json(json!({"label_id": null})), 204),
         r("PUT", "/api/shopping-lists/{list}/section-order", Household, |i| Req::Json(json!({"label_ids": [i.label]})), 200),
+        r("GET", "/api/cookbooks/{cookbook}", Group, none, 200),
+        r("PUT", "/api/cookbooks/{cookbook}", Group, |_| Req::Json(json!({"name": "Renamed"})), 200),
+        r("DELETE", "/api/cookbooks/{cookbook}", Spent, none, 204),
+        r("GET", "/api/cookbooks/{cookbook}/recipes", Group, none, 200),
+        r("GET", "/api/meal-plan-rules/{rule}", Group, none, 200),
+        r("PUT", "/api/meal-plan-rules/{rule}", Group, |_| Req::Json(json!({"slot": "lunch"})), 200),
+        r("DELETE", "/api/meal-plan-rules/{rule}", Spent, none, 204),
     ]
 }
 
@@ -235,6 +251,13 @@ fn html_routes() -> Vec<Route> {
         r("POST", "/lists/{list}/sections/{label}/move", Household, |_| Req::Form("dir=up".into()), 303),
         r("POST", "/settings/labels/{label}", Group, |_| Req::Form("name=Renamed&color=%23010203".into()), 303),
         r("POST", "/settings/labels/{label}/delete", Spent, |_| Req::Form(String::new()), 303),
+        r("GET", "/cookbooks/{cookbook}", Group, none, 200),
+        r("GET", "/cookbooks/{cookbook}/edit", Group, none, 200),
+        r("POST", "/cookbooks/{cookbook}/edit", Group, |_| Req::Form("name=Renamed".into()), 303),
+        r("POST", "/cookbooks/{cookbook}/builder", Group, |_| Req::Form("tags_mode=any".into()), 303),
+        r("POST", "/cookbooks/{cookbook}/delete", Spent, |_| Req::Form(String::new()), 303),
+        r("POST", "/settings/rules/{rule}", Group, |_| Req::Form("day=tuesday".into()), 303),
+        r("POST", "/settings/rules/{rule}/delete", Spent, |_| Req::Form(String::new()), 303),
     ]
 }
 
@@ -323,6 +346,7 @@ fn html_routes_are_all_listed() {
         include_str!("../src/web/recipes.rs"),
         include_str!("../src/web/batches.rs"),
         include_str!("../src/web/planner.rs"),
+        include_str!("../src/web/cookbooks.rs"),
         include_str!("../src/web/shopping.rs"),
         include_str!("../src/web/settings.rs"),
     ]
@@ -377,6 +401,8 @@ async fn ids_in_request_bodies_are_checked_against_the_callers_tenant() {
         ("alice", "PUT", format!("/api/foods/{}/label", i.food), "label of another group".into(), json!({"label_id": c_label})),
         ("alice", "PUT", format!("/api/shopping-lists/{}/section-order", i.list), "label of another group".into(), json!({"label_ids": [c_label]})),
         ("alice", "POST", format!("/api/shopping-lists/{}/items", i.list), "label of another group".into(), json!({"note": "x", "label_id": c_label})),
+        ("alice", "POST", "/api/meal-plan-rules".to_string(), "household of another group".into(), json!({"household_ids": [w.t.c.household_id]})),
+        ("alice", "PUT", format!("/api/meal-plan-rules/{}", i.rule), "household of another group".into(), json!({"household_ids": [w.t.c.household_id]})),
         ("alice", "PUT", format!("/api/shopping-list-items/{}", i.item), "label of another group".into(), json!({"note": "x", "label_id": c_label})),
     ];
     for (who, method, uri, what, body) in cases {
@@ -405,6 +431,14 @@ async fn ids_in_request_bodies_are_checked_against_the_callers_tenant() {
         assert_eq!(s, nf, "{who} POST {uri} {form}: {text}");
         assert_eq!(w.fingerprint().await, before, "{who} POST {uri} {form} changed something");
     }
+    // the cookbook builder: a tag of another group's is not a tag of ours
+    let c_book = w.db.add_cookbook(&w.t.c, CookbookInput { name: "Theirs".into(), ..Default::default() }).await.unwrap().id;
+    w.db.create_recipe(&w.t.a, RecipeInput { name: "Tagged".into(), tags: vec!["ours".into()], ..Default::default() }).await.unwrap();
+    let our_tag: i64 = sqlx::query_scalar("SELECT id FROM tags WHERE name = 'ours'").fetch_one(w.db.pool()).await.unwrap();
+    let before = w.fingerprint().await;
+    let (s, _, text) = send(&w.app, "POST", &format!("/cookbooks/{c_book}/builder"), Some(&w.carol), Req::Form(format!("tags={our_tag}&tags_mode=any"))).await;
+    assert_eq!(s, nf, "a tag of another group in the cookbook builder: {text}");
+    assert_eq!(w.fingerprint().await, before);
     // controls: a household of the same group may use the shared recipe
     let (s, _, _) = send(&w.app, "POST", "/plan/entries", Some(&w.bob), Req::Form(format!("date=2026-12-01&slot=dinner&recipe_id={}&scale=1", i.recipe))).await;
     assert_eq!(s, StatusCode::SEE_OTHER);

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ name }} - mealier{% endblock %}
+{% block content %}
+<h1>Edit {{ name }}</h1>
+<form method="post" action="/cookbooks/{{ id }}/edit" class="stack">
+  <label class="block">Name <input type="text" name="name" value="{{ name }}" required></label>
+  <label class="block">Description <input type="text" name="description" value="{{ description }}"></label>
+  <label>Position <input type="number" name="position" value="{{ position }}"></label>
+  <label><input type="checkbox" name="public"{% if public %} checked{% endif %}> Public</label>
+  <label class="block">Filter, in Mealie's syntax (empty lists every recipe)
+    <textarea name="query_filter" rows="3">{{ query_filter }}</textarea>
+  </label>
+  {% if !supported %}<p role="alert">{{ reason }}</p>{% endif %}
+  <button type="submit">Save</button>
+</form>
+
+<h2>Builder</h2>
+<p><small>Pick tags, categories and tools. Saving writes a filter string (shown above) and replaces the one there. Pick nothing to clear it.</small></p>
+<form method="post" action="/cookbooks/{{ id }}/builder" class="stack">
+{% for g in groups %}
+  <fieldset>
+    <legend>{{ g.title }}</legend>
+    <label><input type="radio" name="{{ g.field }}_mode" value="any"{% if !g.all %} checked{% endif %}> any of</label>
+    <label><input type="radio" name="{{ g.field }}_mode" value="all"{% if g.all %} checked{% endif %}> all of</label>
+    <div>
+    {% for o in g.options %}<label><input type="checkbox" name="{{ g.field }}" value="{{ o.id }}"{% if o.checked %} checked{% endif %}> {{ o.name }}</label>{% else %}<small>None yet. They are added when a recipe uses them.</small>{% endfor %}
+    </div>
+  </fieldset>
+{% endfor %}
+  <button type="submit">Build filter</button>
+</form>
+<p><a href="/cookbooks/{{ id }}">Back to the cookbook</a></p>
+{% endblock %}

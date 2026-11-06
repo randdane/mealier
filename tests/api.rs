@@ -273,6 +273,18 @@ async fn openapi_lists_every_recipe_route() {
         "PUT /api/shopping-lists/{id}/section-order",
         "GET /api/export",
         "POST /api/restore",
+        "GET /api/cookbooks",
+        "POST /api/cookbooks",
+        "GET /api/cookbooks/{id}",
+        "PUT /api/cookbooks/{id}",
+        "DELETE /api/cookbooks/{id}",
+        "GET /api/cookbooks/{id}/recipes",
+        "GET /api/meal-plan-rules",
+        "POST /api/meal-plan-rules",
+        "GET /api/meal-plan-rules/{id}",
+        "PUT /api/meal-plan-rules/{id}",
+        "DELETE /api/meal-plan-rules/{id}",
+        "POST /api/meal-plan/suggest",
     ];
     expected.sort();
     assert_eq!(found, expected);

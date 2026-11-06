@@ -5,6 +5,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && touch src/lib.rs \
     && (cargo build --release --locked || true) && rm -rf src
+COPY build.rs build.rs
 COPY migrations migrations
 COPY templates templates
 COPY static static

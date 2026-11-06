@@ -10,6 +10,7 @@ use crate::api::AppState;
 use crate::{Error, Result, Scope};
 
 mod batches;
+mod cookbooks;
 mod planner;
 mod recipes;
 mod settings;
@@ -21,6 +22,7 @@ pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .merge(recipes::routes())
         .merge(batches::routes())
+        .merge(cookbooks::routes())
         .merge(planner::routes())
         .merge(shopping::routes())
         .merge(settings::routes())
@@ -82,4 +84,9 @@ async fn image(sc: Scope, State(s): State<AppState>, Path(name): Path<String>) -
         Ok(bytes) => ([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "public, max-age=31536000, immutable".into())], bytes).into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// A urlencoded body as its key/value pairs, repeats included (a checkbox group sends the key once per tick).
+fn pairs(body: &[u8]) -> Result<Vec<(String, String)>> {
+    serde_urlencoded::from_bytes(body).map_err(|e| Error::Validation(format!("bad form: {e}")))
 }

@@ -174,10 +174,13 @@ async fn build_content(tx: &mut Transaction<'_, Sqlite>, group_id: i64, input: R
         });
     }
     // The group's vocabularies learn every name a recipe uses.
-    for (table, names) in [("tags", &input.tags), ("categories", &input.categories), ("tools", &input.tools), ("cookbooks", &input.cookbooks)] {
+    for (table, names) in [("tags", &input.tags), ("categories", &input.categories), ("tools", &input.tools)] {
         for name in names {
             sqlx::query(&format!("INSERT OR IGNORE INTO {table} (group_id, name) VALUES (?, ?)")).bind(group_id).bind(name).execute(&mut **tx).await?;
         }
+    }
+    for name in &input.cookbooks {
+        crate::cookbooks::ensure_cookbook(tx, group_id, name).await?;
     }
     Ok(Content {
         name: input.name,

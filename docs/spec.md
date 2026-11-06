@@ -2,7 +2,7 @@
 
 Status: agreed 2026-11-05, revised after a Codex review the same day. Revised
 2026-11-06: groups and households, full Mealie-export coverage, export and
-restore, share links, scheduled webhooks on demand. Steps 1–11 of the build
+restore, share links, scheduled webhooks on demand. Steps 1–13 of the build
 order are implemented; the remaining work is under "Build order".
 
 ## Goal
@@ -132,11 +132,12 @@ Sablier stops the container when idle, so stop/start is routine.
   Adding them never changes the recipe or creates a snapshot.
 - **Meal plan entry**: household, date, meal slot, recipe or title + text,
   optionally a `planned` batch.
-- **Meal-plan rule**: group, optional households, day of week or any, slot or
-  any, tag/category filters. Used to suggest a random matching recipe.
-- **Cookbook**: group, name, description, and a saved filter (tags,
-  categories, tools, and a free-form query compatible with Mealie's filter
-  strings where it maps). Membership is computed, not stored.
+- **Meal-plan rule**: group, optional households (none means all of the
+  group's), day of week or any, slot or any, and a filter. Used to suggest a
+  random matching recipe.
+- **Cookbook**: group, name, description, slug, position, public flag, and a
+  saved filter in Mealie's filter-string syntax, kept as written, plus its
+  parsed form. Membership is computed, not stored.
 - **Shopping list** and items (household-scoped); items carry label, extras
   and recipe references.
 - **Recipe action**: household, title, kind (`link` or `post`), URL template.
@@ -195,6 +196,38 @@ means they are not remembered, and nothing is sent to the server.
 Plan recipes by date and slot, per household. A plan entry can carry a
 `planned` batch (scale and changes). Meal-plan rules suggest a random matching
 recipe for an empty day/slot.
+
+### Cookbooks and meal-plan rules
+
+Both hold a filter in Mealie's `query_filter_string` syntax. It is parsed by
+`src/filter.rs` and run as a parameterised WHERE over the caller's group's live
+recipes; no value is ever spliced into SQL. Supported: `tags`, `recipe_category`
+(also `categories`) and `tools`, by `.id` or `.name`, with `IN`, `NOT IN` and
+`CONTAINS ALL`; `name` and `description` with `LIKE`, `NOT LIKE`, `=`, `<>`;
+`lastMade`, `dateAdded` (`created_at`), `dateUpdated` (`updated_at`) with `=`,
+`<>`, `<`, `<=`, `>`, `>=` against a `YYYY-MM-DD` date, and `IS [NOT] NULL`;
+`rating` with the same comparisons against a number; `AND`, `OR` (AND binds
+tighter) and parentheses; keywords and field spellings are case-insensitive.
+`lastMade` and `rating` read the caller's household's done batches (rating is
+their average until per-user ratings arrive in step 14); `dateAdded` is the
+first snapshot's day, `dateUpdated` the current one's. An empty filter selects
+every recipe. Anything else is an error naming the token: the API and forms
+refuse it (422); the importer keeps the string verbatim, stores no parsed form
+and reports it, and the cookbook or rule then shows "filter not supported" and
+selects nothing. Ids written by hand are mealier ids; the importer maps
+Mealie's uuids (an unknown one becomes 0, which matches nothing).
+
+The cookbook edit page has a builder (tags, categories, tools; any or all)
+that writes such a string. `GET /api/cookbooks/{id}/recipes` and
+`/cookbooks/{id}` list the matches.
+
+`suggest(scope, date, slot)` takes the rules of the caller's group that apply
+to the caller's household on that weekday and slot, keeps the most specific
+tier (day and slot, then day, then slot, then neither), pools the recipes those
+rules select and picks one with an injectable, seedable generator. No applicable
+rule, or a tier that selects nothing, gives none; there is no fall back to a
+looser tier. `POST /api/meal-plan/suggest {date, slot}`; the plan page offers
+"Suggest" for a day's empty meals and fills the add form.
 
 ### Shopping list
 
@@ -410,11 +443,11 @@ households. 11. Review fixes: site-local IPv6, image module (decode, resize,
 one copy) with image hashes in snapshots, batch cook mode from the snapshot and
 remembered ticks, one quantity-range helper, export and restore, error mapping
 in one module with HTML error pages, `web.rs` split by page area, full recipe
-form. 12. Labels and shopping-list sections.
+form. 12. Labels and shopping-list sections. 13. Cookbook filters and meal-plan
+rules.
 
 Remaining, in order:
 
-13. Cookbook filters and meal-plan rules.
 14. Recipe features: assets, notes, sections, ingredient links, substitutions,
     extras, favourites and ratings, settings, recipe actions, foods on hand and
     tools owned, share links.
@@ -426,13 +459,12 @@ Remaining, in order:
 
 2026-11-06.
 
-- Phase: step 12 (labels and shopping-list sections) done, not committed; 408 tests pass (1 ignored,
+- Phase: step 13 (cookbook filters and meal-plan rules) done, not committed; 463 tests pass (1 ignored,
   needs a real Mealie backup), clippy clean with `-D warnings`.
 - In flight: nothing. No agents or servers running.
 - Blocked on the owner: nothing until deploy (step 17 needs a GitHub repo,
   an Authentik application, and secrets).
-- Next: step 13 (cookbook filters and meal-plan rules), then 14–16 without
-  stopping unless a decision is needed.
+- Next: step 14 (recipe features), then 15–16 without stopping unless a decision is needed.
 - Production Mealie still holds the `mealier-fixture` items and three extra
   backups; `scripts/cleanup-mealie-fixture.py` removes the items after step 16
   (step 16 adds more fixture data first).

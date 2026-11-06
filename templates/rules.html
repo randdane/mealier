@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Meal-plan rules - mealier{% endblock %}
+{% block content %}
+<h1>Meal-plan rules</h1>
+<p><small>A rule says which recipes may be suggested for an empty day and meal. The most specific rule that applies wins: day and meal, then day, then meal, then any. A rule can be limited to some of the group's households; none ticked means all of them. Filters use Mealie's syntax.</small></p>
+{% for r in rules %}
+<form method="post" action="/settings/rules/{{ r.id }}" class="stack">
+  <label>Day <select name="day">{% for o in r.days %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.value }}</option>{% endfor %}</select></label>
+  <label>Meal <select name="slot">{% for o in r.slots %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.value }}</option>{% endfor %}</select></label>
+  <label class="block">Filter <input type="text" name="query_filter" value="{{ r.query_filter }}"></label>
+  {% if !r.supported %}<p role="alert">{{ r.reason }}. This rule suggests nothing until the filter is rewritten.</p>{% endif %}
+  <div>{% for h in r.households %}<label><input type="checkbox" name="households" value="{{ h.id }}"{% if h.checked %} checked{% endif %}> {{ h.name }}</label>{% endfor %}</div>
+  <button type="submit">Save</button>
+</form>
+<form method="post" action="/settings/rules/{{ r.id }}/delete" class="inline"><button type="submit" class="quiet">Delete rule</button></form>
+<hr>
+{% else %}
+<p>No rules yet.</p>
+{% endfor %}
+
+<h2>New rule</h2>
+<form method="post" action="/settings/rules" class="stack">
+  <label>Day <select name="day">{% for d in days %}<option value="{{ d }}">{{ d }}</option>{% endfor %}</select></label>
+  <label>Meal <select name="slot">{% for s in slots %}<option value="{{ s }}">{{ s }}</option>{% endfor %}</select></label>
+  <label class="block">Filter <input type="text" name="query_filter" placeholder='tags.name IN ["quick"]'></label>
+  <div>{% for h in households %}<label><input type="checkbox" name="households" value="{{ h.id }}"> {{ h.name }}</label>{% endfor %}</div>
+  <button type="submit">Add rule</button>
+</form>
+{% endblock %}

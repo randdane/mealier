@@ -37,7 +37,7 @@ pub struct Household {
 const DEFAULT_KEY: &str = "default_household_id";
 
 /// Lowercase ASCII letters and digits, runs of anything else become one `-`.
-fn slugify(name: &str, fallback: &str) -> String {
+pub(crate) fn slugify(name: &str, fallback: &str) -> String {
     let mut out = String::new();
     for c in name.chars().flat_map(char::to_lowercase) {
         if c.is_ascii_alphanumeric() {
@@ -59,7 +59,7 @@ fn clean_name(name: &str, what: &str) -> Result<String> {
 }
 
 /// `base`, `base-2`, `base-3`... whichever `taken` says is free.
-async fn free_slug(conn: &mut SqliteConnection, table: &str, scope: Option<i64>, base: &str) -> Result<String> {
+pub(crate) async fn free_slug(conn: &mut SqliteConnection, table: &str, scope: Option<i64>, base: &str) -> Result<String> {
     for n in 1..1000 {
         let slug = if n == 1 { base.to_string() } else { format!("{base}-{n}") };
         let sql = match scope {

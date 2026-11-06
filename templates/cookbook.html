@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} - mealier{% endblock %}
+{% block content %}
+<h1>{{ name }}</h1>
+{% if !description.is_empty() %}<p>{{ description }}</p>{% endif %}
+{% if supported %}
+  {% if !query_filter.is_empty() %}<p><small>Filter: <code>{{ query_filter }}</code></small></p>{% endif %}
+{% else %}
+  <p role="alert">{{ reason }}. This cookbook lists nothing until its filter is rewritten on the edit page.<br><small>Filter as imported: <code>{{ query_filter }}</code></small></p>
+{% endif %}
+<ul>
+{% for r in recipes %}<li><a href="/recipes/{{ r.id }}">{{ r.name }}</a></li>{% else %}<li>No recipes match.</li>{% endfor %}
+</ul>
+<p><a href="/cookbooks/{{ id }}/edit">Edit</a> · <a href="/cookbooks">All cookbooks</a></p>
+<form method="post" action="/cookbooks/{{ id }}/delete" class="inline"><button type="submit" class="quiet">Delete cookbook</button></form>
+{% endblock %}

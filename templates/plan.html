@@ -2,6 +2,7 @@
 {% block title %}Meal plan - mealier{% endblock %}
 {% block content %}
 <h1>Meal plan</h1>
+{% if !note.is_empty() %}<p role="status">{{ note }}</p>{% endif %}
 <p class="weeknav"><a href="/plan?week={{ prev }}">&larr; Previous</a> <strong>Week of {{ week }}</strong> <a href="/plan?week={{ next }}">Next &rarr;</a></p>
 
 {% for d in days %}
@@ -18,15 +19,22 @@
     </li>
   {% endfor %}
   </ul>
-  <details>
+  {% if !d.free_slots.is_empty() %}
+  <form method="get" action="/plan/suggest" class="inline">
+    <input type="hidden" name="date" value="{{ d.date }}">
+    <select name="slot" aria-label="Meal to suggest for">{% for s in d.free_slots %}<option value="{{ s }}">{{ s }}</option>{% endfor %}</select>
+    <button type="submit" class="quiet">Suggest</button>
+  </form>
+  {% endif %}
+  <details{% if d.open %} open{% endif %}>
     <summary>Add</summary>
     <form method="post" action="/plan/entries" class="stack">
       <input type="hidden" name="date" value="{{ d.date }}">
       <label>Meal
-        <select name="slot">{% for s in slots %}<option value="{{ s }}"{% if s == &"dinner" %} selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+        <select name="slot">{% for s in d.slot_opts %}<option value="{{ s.name }}"{% if s.selected %} selected{% endif %}>{{ s.name }}</option>{% endfor %}</select>
       </label>
       <label>Recipe
-        <select name="recipe_id"><option value="">(none, use a title)</option>{% for r in recipes %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select>
+        <select name="recipe_id"><option value="">(none, use a title)</option>{% for r in recipes %}<option value="{{ r.id }}"{% if r.id == d.suggested %} selected{% endif %}>{{ r.name }}</option>{% endfor %}</select>
       </label>
       <label>Or title <input type="text" name="title" placeholder="Leftovers, eating out"></label>
       <label>Plan a batch at scale <input type="number" name="scale" step="any" min="0" inputmode="decimal" placeholder="none"></label>
