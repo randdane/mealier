@@ -1,7 +1,11 @@
 use std::path::Path;
 
 pub mod api;
+mod import;
+mod people;
 mod recipes;
+pub use import::*;
+pub use people::*;
 pub use recipes::*;
 
 use sqlx::SqlitePool;
@@ -19,6 +23,8 @@ pub enum Error {
     Migrate(#[from] sqlx::migrate::MigrateError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

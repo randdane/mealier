@@ -32,6 +32,7 @@ pub struct RecipeInput {
     pub tags: Vec<String>,
     pub categories: Vec<String>,
     pub cookbooks: Vec<String>,
+    pub tools: Vec<String>,
     pub ingredients: Vec<IngredientInput>,
     pub steps: Vec<String>,
 }
@@ -61,6 +62,8 @@ pub struct Content {
     pub tags: Vec<String>,
     pub categories: Vec<String>,
     pub cookbooks: Vec<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
     pub ingredients: Vec<Ingredient>,
     pub steps: Vec<String>,
 }
@@ -156,6 +159,7 @@ async fn build_content(tx: &mut Transaction<'_, Sqlite>, input: RecipeInput) -> 
         tags: input.tags,
         categories: input.categories,
         cookbooks: input.cookbooks,
+        tools: input.tools,
         ingredients,
         steps: input.steps,
     })
@@ -171,7 +175,7 @@ pub enum Dimension {
 }
 
 impl Dimension {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Dimension::Mass => "mass",
             Dimension::Volume => "volume",
@@ -210,6 +214,18 @@ fn snapshot_from(row: &sqlx::sqlite::SqliteRow) -> Result<Snapshot> {
         created_at: row.get(2),
         content: serde_json::from_str(row.get(3))?,
     })
+}
+
+/// Creates a recipe and its first snapshot inside the caller's transaction.
+pub(crate) async fn insert_recipe(tx: &mut Transaction<'_, Sqlite>, input: RecipeInput) -> Result<Recipe> {
+    let content = build_content(tx, input).await?;
+    let id = sqlx::query("INSERT INTO recipes (name) VALUES (?)")
+        .bind(&content.name)
+        .execute(&mut **tx)
+        .await?
+        .last_insert_rowid();
+    let current_snapshot_id = write_snapshot(tx, id, &content).await?;
+    Ok(Recipe { id, archived: false, current_snapshot_id, content })
 }
 
 impl Db {
@@ -300,15 +316,9 @@ impl Db {
 
     pub async fn create_recipe(&self, input: RecipeInput) -> Result<Recipe> {
         let mut tx = self.pool.begin().await?;
-        let content = build_content(&mut tx, input).await?;
-        let id = sqlx::query("INSERT INTO recipes (name) VALUES (?)")
-            .bind(&content.name)
-            .execute(&mut *tx)
-            .await?
-            .last_insert_rowid();
-        let current_snapshot_id = write_snapshot(&mut tx, id, &content).await?;
+        let recipe = insert_recipe(&mut tx, input).await?;
         tx.commit().await?;
-        Ok(Recipe { id, archived: false, current_snapshot_id, content })
+        Ok(recipe)
     }
 
     pub async fn get_recipe(&self, id: i64) -> Result<Option<Recipe>> {
