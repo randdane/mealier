@@ -27,7 +27,7 @@ async fn imported() -> (Db, ImportReport, tempfile::TempDir) {
 async fn units_and_foods_are_imported_with_dimensions_and_aliases() {
     let (db, report, _dir) = imported().await;
     assert_eq!(report.units, 26);
-    assert_eq!(report.foods, 2689);
+    assert_eq!(report.foods, 2691);
 
     let units = db.units(&tenant(&db).await).await.unwrap();
     let unit = |name: &str| units.iter().find(|u| u.name == name).unwrap();
@@ -58,7 +58,7 @@ async fn recipe_a_is_imported_with_one_snapshot_and_its_fields() {
     let (db, report, _dir) = imported().await;
     assert_eq!(
         (report.recipes, report.tags, report.categories, report.cookbooks, report.tools),
-        (2, 2, 2, 1, 1)
+        (3, 2, 2, 3, 1)
     );
     let a = recipe(&db, "mealier-fixture-recipe-a").await;
     assert_eq!(db.snapshots(&tenant(&db).await, a.id).await.unwrap().len(), 1);
@@ -144,7 +144,7 @@ async fn a_made_it_event_becomes_an_imported_done_batch_without_snapshot() {
 async fn other_timeline_events_are_reported_and_the_comment_is_kept() {
     let (db, report, _dir) = imported().await;
     assert!(report.skipped.iter().any(|s| s.contains("mealier-fixture info event")), "{:?}", report.skipped);
-    assert!(report.skipped.iter().any(|s| s.contains("2 system timeline events")), "{:?}", report.skipped);
+    assert!(report.skipped.iter().any(|s| s.contains("3 system timeline events")), "{:?}", report.skipped);
     assert!(!report.skipped.iter().any(|s| s.contains("last_made")), "a's last_made has its made event");
 
     assert_eq!(report.comments, 1);
@@ -159,7 +159,7 @@ async fn other_timeline_events_are_reported_and_the_comment_is_kept() {
 #[tokio::test]
 async fn meal_plan_entries_include_the_note_only_one() {
     let (db, report, _dir) = imported().await;
-    assert_eq!(report.meal_plan_entries, 2);
+    assert_eq!(report.meal_plan_entries, 3, "two in the first household, one in the second");
     let a = recipe(&db, "mealier-fixture-recipe-a").await;
 
     let plan = db.meal_plan(&tenant(&db).await, "2026-12-01", "2026-12-31").await.unwrap();
@@ -178,7 +178,7 @@ async fn meal_plan_entries_include_the_note_only_one() {
 #[tokio::test]
 async fn shopping_list_items_keep_checked_state_amounts_and_recipe() {
     let (db, report, _dir) = imported().await;
-    assert_eq!((report.shopping_lists, report.shopping_list_items), (1, 4));
+    assert_eq!((report.shopping_lists, report.shopping_list_items), (2, 5), "the second household's list has one item");
     let a = recipe(&db, "mealier-fixture-recipe-a").await;
     let units = db.units(&tenant(&db).await).await.unwrap();
     let cup = units.iter().find(|u| u.name == "mealier-fixture-cup").unwrap().id;
@@ -205,7 +205,8 @@ async fn recipe_images_are_stored_under_their_sha256() {
     let (db, report, dir) = imported().await;
     assert_eq!(report.images, 1);
     // The importer re-encodes the original like any upload, so the name is the hash of what is stored.
-    let files: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    // (the `assets` folder next to the images holds recipe c's attachment, see `import_fixture.rs`)
+    let files: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).filter(|n| n != "assets").collect();
     assert_eq!(files.len(), 1);
     let hash = files[0].strip_suffix(".webp").expect("a .webp file").to_string();
     let bytes = std::fs::read(dir.path().join(&files[0])).unwrap();
@@ -260,7 +261,7 @@ async fn a_non_empty_database_is_refused_and_left_as_it_was() {
     let err = import_mealie_backup(&db, &fixture(), dir.path()).await.unwrap_err();
     assert!(matches!(&err, mealier::Error::Validation(m) if m.contains("not empty")), "{err}");
     assert_eq!(db.units(&tenant(&db).await).await.unwrap().len(), 26);
-    assert_eq!(db.list_recipes(&tenant(&db).await, true, None).await.unwrap().len(), 2);
+    assert_eq!(db.list_recipes(&tenant(&db).await, true, None).await.unwrap().len(), 3);
 
     let db = Db::open_memory().await.unwrap();
     db.add_food(&common::scope(&db).await, "salt").await.unwrap();
@@ -324,19 +325,22 @@ async fn count_in(db: &Db, sql: &str) -> i64 {
 }
 
 #[tokio::test]
-async fn the_fixture_lands_in_its_own_group_and_household() {
+async fn the_fixture_lands_in_its_own_groups_and_households() {
     let (db, report, _dir) = imported().await;
-    assert_eq!((report.groups, report.households), (1, 1));
+    assert_eq!((report.groups, report.households), (2, 2));
     let groups = db.groups().await.unwrap();
-    assert_eq!(groups.iter().map(|g| (g.name.as_str(), g.slug.as_str())).collect::<Vec<_>>(), vec![("Fixture", "fixture")]);
+    assert_eq!(groups.iter().map(|g| (g.name.as_str(), g.slug.as_str())).collect::<Vec<_>>(), vec![("Fixture", "fixture"), ("Fixture Two", "fixture-two")]);
     let households = db.households().await.unwrap();
-    assert_eq!(households.iter().map(|h| (h.name.as_str(), h.slug.as_str(), h.group_id)).collect::<Vec<_>>(), vec![("Fixture", "fixture", groups[0].id)]);
+    assert_eq!(
+        households.iter().map(|h| (h.name.as_str(), h.slug.as_str(), h.group_id)).collect::<Vec<_>>(),
+        vec![("Fixture", "fixture", groups[0].id), ("Fixture Two", "fixture-two", groups[1].id)]
+    );
     assert_eq!(db.default_household().await.unwrap(), households[0], "the first imported household becomes the default");
 
     let admin = user(&db, "fixture-admin").await;
     let member = user(&db, "fixture-user").await;
-    assert_eq!([admin.household_id, member.household_id], [households[0].id; 2]);
-    assert_eq!(admin.group_id, groups[0].id);
+    assert_eq!([admin.household_id, member.household_id], [households[0].id, households[1].id]);
+    assert_eq!([admin.group_id, member.group_id], [groups[0].id, groups[1].id]);
 
     let g = groups[0].id;
     let h = households[0].id;
@@ -345,11 +349,13 @@ async fn the_fixture_lands_in_its_own_group_and_household() {
         assert!(count_in(&db, &format!("SELECT count(*) FROM {t}")).await > 0, "{t} imported");
     }
     for t in ["batches", "meal_plan_entries", "shopping_lists"] {
-        assert_eq!(count_in(&db, &format!("SELECT count(*) FROM {t} WHERE household_id != {h}")).await, 0, "{t} outside the household");
-        assert!(count_in(&db, &format!("SELECT count(*) FROM {t}")).await > 0, "{t} imported");
+        assert!(count_in(&db, &format!("SELECT count(*) FROM {t} WHERE household_id = {h}")).await > 0, "{t} in the first household");
+        assert_eq!(count_in(&db, &format!("SELECT count(*) FROM {t} WHERE household_id = {}", households[1].id)).await > 0, t != "batches", "{t} in the second household");
     }
     let pref: (i64, bool) = sqlx::query_as("SELECT first_day_of_week, private_household FROM household_preferences WHERE household_id = ?").bind(h).fetch_one(db.pool()).await.unwrap();
     assert_eq!(pref, (0, false));
+    let pref2: (i64, bool) = sqlx::query_as("SELECT first_day_of_week, private_household FROM household_preferences WHERE household_id = ?").bind(households[1].id).fetch_one(db.pool()).await.unwrap();
+    assert_eq!(pref2, (0, true), "the second household is private");
     let (private, extra): (bool, String) = sqlx::query_as("SELECT private_group, extra FROM group_preferences WHERE group_id = ?").bind(g).fetch_one(db.pool()).await.unwrap();
     assert!(!private);
     assert!(extra.contains("recipe_public"), "the other preference fields are kept: {extra}");
@@ -372,28 +378,24 @@ fn push(v: &mut serde_json::Value, table: &str, row: serde_json::Value) {
     v[table].as_array_mut().unwrap().push(row);
 }
 
-/// The fixture plus: a second household in its group (one user, a list, a plan entry, a made-it event),
-/// and a second group with its own household, user, units, foods, tag, recipe, plan, list and made-it event.
+/// The fixture plus: a second household in the first group (one user, a list, a plan entry, a made-it
+/// event), and, in the fixture's real second group (whose household and user are real rows), units,
+/// foods, a tag, a recipe, a plan entry, a list item and a made-it event of its own.
 fn two_groups(v: &mut serde_json::Value) {
     use serde_json::json;
     let f = "6a1a76f2eef844d7b079f8421d1d7b6d";
     let a_recipe = "9de853457e8748ff8f4712c3a19bc18c";
-    let (h2, g2, gh) = ("00000000000000000000000000000h02", "00000000000000000000000000000g02", "000000000000000000000000000000h3");
-    let (u3, u4) = ("0000000000000000000000000000u003", "0000000000000000000000000000u004");
+    let (g2, u4) = ("1a22c99047784995a1f1ac9ae9d8f714", "30eb0800db984398b168a418da4f3f96");
+    let (h2, u3) = ("00000000000000000000000000000h02", "0000000000000000000000000000u003");
     let (cup2, flour2, tag2, recipe2) = ("00000000000000000000000000000c02", "00000000000000000000000000000f02", "00000000000000000000000000000t02", "00000000000000000000000000000r02");
-    push(v, "households", json!({"id": h2, "group_id": f, "name": "Fixture Two", "slug": "fixture-two"}));
+    push(v, "households", json!({"id": h2, "group_id": f, "name": "Fixture Three", "slug": "fixture-three"}));
     push(v, "household_preferences", json!({"id": "p2", "household_id": h2, "first_day_of_week": 3, "private_household": true}));
-    push(v, "groups", json!({"id": g2, "name": "Second", "slug": "second"}));
-    push(v, "group_preferences", json!({"id": "p3", "group_id": g2, "private_group": true, "first_day_of_week": 1}));
-    push(v, "households", json!({"id": gh, "group_id": g2, "name": "Second Home", "slug": "second-home"}));
-    push(v, "household_preferences", json!({"id": "p4", "household_id": gh, "first_day_of_week": 1, "private_household": true}));
     push(v, "users", json!({"id": u3, "username": "second-user", "email": "second@example.invalid", "full_name": "S", "admin": false, "group_id": f, "household_id": h2}));
-    push(v, "users", json!({"id": u4, "username": "g2-user", "email": "g2@example.invalid", "full_name": "G", "admin": false, "group_id": g2, "household_id": gh}));
     push(v, "ingredient_units", json!({"id": cup2, "name": "mealier-fixture-cup", "abbreviation": "", "group_id": g2}));
     push(v, "ingredient_foods", json!({"id": flour2, "name": "mealier-fixture-flour", "group_id": g2}));
     push(v, "tags", json!({"id": tag2, "name": "mealier-fixture-tag-1", "group_id": g2}));
     push(v, "recipes", json!({"id": recipe2, "name": "g2-recipe", "group_id": g2, "description": "", "user_id": u4}));
-    push(v, "recipes_ingredients", json!({"id": "i1", "recipe_id": recipe2, "position": 0, "quantity": 1.0, "unit_id": cup2, "food_id": flour2, "note": "", "original_text": "1 cup flour"}));
+    push(v, "recipes_ingredients", json!({"id": 1000, "recipe_id": recipe2, "position": 0, "quantity": 1.0, "unit_id": cup2, "food_id": flour2, "note": "", "original_text": "1 cup flour"}));
     push(v, "recipe_instructions", json!({"id": "s1", "recipe_id": recipe2, "position": 0, "text": "Mix."}));
     push(v, "recipes_to_tags", json!({"recipe_id": recipe2, "tag_id": tag2}));
     // second household of the first group
@@ -401,8 +403,7 @@ fn two_groups(v: &mut serde_json::Value) {
     push(v, "group_meal_plans", json!({"id": 10, "date": "2026-12-05", "entry_type": "dinner", "group_id": f, "recipe_id": a_recipe, "title": "", "text": "", "user_id": u3}));
     push(v, "recipe_timeline_events", json!({"id": "e2", "event_type": "comment", "recipe_id": a_recipe, "subject": "second made it", "timestamp": "2026-11-07T10:00:00", "message": "by the second household", "user_id": u3}));
     // the second group
-    push(v, "shopping_lists", json!({"id": "l3", "name": "g2 list", "group_id": g2, "user_id": u4}));
-    push(v, "shopping_list_items", json!({"id": "it3", "shopping_list_id": "l3", "quantity": 2.0, "unit_id": cup2, "food_id": flour2, "note": "", "checked": false}));
+    push(v, "shopping_list_items", json!({"id": "it3", "shopping_list_id": "0ac5aeee14214218b8805ef6eafff944", "quantity": 2.0, "unit_id": cup2, "food_id": flour2, "note": "", "checked": false}));
     push(v, "group_meal_plans", json!({"id": 11, "date": "2026-12-06", "entry_type": "lunch", "group_id": g2, "recipe_id": recipe2, "title": "", "text": "", "user_id": u4}));
     push(v, "recipe_timeline_events", json!({"id": "e3", "event_type": "comment", "recipe_id": recipe2, "subject": "g2 made it", "timestamp": "2026-11-08T10:00:00", "message": "g2 batch", "user_id": u4}));
 }
@@ -413,24 +414,24 @@ async fn a_backup_with_two_groups_and_three_households_lands_each_in_its_own_ten
     let db = Db::open_memory().await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let report = import_mealie_backup(&db, &zip, dir.path()).await.unwrap();
-    assert_eq!((report.groups, report.households, report.users), (2, 3, 4));
-    assert_eq!(db.groups().await.unwrap().iter().map(|g| g.slug.as_str()).collect::<Vec<_>>(), vec!["fixture", "second"]);
-    assert_eq!(db.households().await.unwrap().iter().map(|h| h.slug.as_str()).collect::<Vec<_>>(), vec!["fixture", "fixture-two", "second-home"]);
+    assert_eq!((report.groups, report.households, report.users), (2, 3, 3));
+    assert_eq!(db.groups().await.unwrap().iter().map(|g| g.slug.as_str()).collect::<Vec<_>>(), vec!["fixture", "fixture-two"]);
+    assert_eq!(db.households().await.unwrap().iter().map(|h| h.slug.as_str()).collect::<Vec<_>>(), vec!["fixture", "fixture-two", "fixture-three"]);
     assert_eq!(db.default_household().await.unwrap().slug, "fixture", "the first household in the backup");
 
-    let (one, two, three) = (tenant(&db).await, mealier::Scope::from(&user(&db, "second-user").await), mealier::Scope::from(&user(&db, "g2-user").await));
-    assert_eq!((one.group_id, two.group_id), (one.group_id, one.group_id));
+    let (one, two, three) = (tenant(&db).await, mealier::Scope::from(&user(&db, "second-user").await), mealier::Scope::from(&user(&db, "fixture-user").await));
+    assert_eq!(two.group_id, one.group_id);
     assert_ne!(three.group_id, one.group_id);
     assert_ne!(two.household_id, one.household_id);
 
     // group-scoped: the first group's households share recipes, units, foods; the second group has its own
     let names = |v: Vec<mealier::RecipeSummary>| v.into_iter().map(|r| r.name).collect::<Vec<_>>();
     assert_eq!(names(db.list_recipes(&one, true, None).await.unwrap()), names(db.list_recipes(&two, true, None).await.unwrap()));
-    assert_eq!(db.list_recipes(&one, true, None).await.unwrap().len(), 2);
+    assert_eq!(db.list_recipes(&one, true, None).await.unwrap().len(), 3);
     assert_eq!(names(db.list_recipes(&three, true, None).await.unwrap()), vec!["g2-recipe"]);
     assert_eq!(db.units(&one).await.unwrap().len(), 26);
     assert_eq!(db.units(&three).await.unwrap().iter().map(|u| u.name.as_str()).collect::<Vec<_>>(), vec!["mealier-fixture-cup"], "same name, its own unit");
-    assert_eq!(db.foods(&one).await.unwrap().len(), 2689);
+    assert_eq!(db.foods(&one).await.unwrap().len(), 2691);
     assert_eq!(db.foods(&three).await.unwrap().len(), 1);
     assert_eq!(count_in(&db, "SELECT count(*) FROM tags WHERE name = 'mealier-fixture-tag-1'").await, 2, "one per group");
     assert_eq!(count_in(&db, "SELECT count(DISTINCT group_id) FROM tags").await, 2);
@@ -442,14 +443,14 @@ async fn a_backup_with_two_groups_and_three_households_lands_each_in_its_own_ten
     };
     assert_eq!(plan(one).await, vec!["2026-12-01", "2026-12-02"]);
     assert_eq!(plan(two).await, vec!["2026-12-05"]);
-    assert_eq!(plan(three).await, vec!["2026-12-06"]);
+    assert_eq!(plan(three).await, vec!["2026-12-05", "2026-12-06"], "the fixture's own entry and the added one");
     let lists = |sc: mealier::Scope| {
         let db = db.clone();
         async move { db.shopping_lists(&sc).await.unwrap().into_iter().map(|l| l.name).collect::<Vec<_>>() }
     };
     assert_eq!(lists(one).await, vec!["mealier-fixture-list"]);
     assert_eq!(lists(two).await, vec!["second list"]);
-    assert_eq!(lists(three).await, vec!["g2 list"]);
+    assert_eq!(lists(three).await, vec!["mealier-fixture-list-g2"]);
 
     let a = recipe(&db, "mealier-fixture-recipe-a").await;
     let notes = |sc: mealier::Scope, id: i64| {
@@ -466,9 +467,9 @@ async fn a_backup_with_two_groups_and_three_households_lands_each_in_its_own_ten
     let r = db.get_recipe(&three, g2_recipe).await.unwrap().unwrap();
     assert_eq!((r.content.ingredients[0].unit_name.as_deref(), r.content.ingredients[0].food_name.as_deref()), (Some("mealier-fixture-cup"), Some("mealier-fixture-flour")));
     let list = db.shopping_list(&three, db.shopping_lists(&three).await.unwrap()[0].id).await.unwrap();
-    assert_eq!(list.items.len(), 1);
+    assert_eq!(list.items.len(), 2, "the fixture's item and the added one");
     let (first_pref,): (i64,) = sqlx::query_as("SELECT first_day_of_week FROM household_preferences WHERE household_id = ?").bind(three.household_id).fetch_one(db.pool()).await.unwrap();
-    assert_eq!(first_pref, 1);
+    assert_eq!(first_pref, 0);
 }
 
 #[tokio::test]
@@ -483,12 +484,12 @@ async fn the_local_admin_who_was_already_there_moves_into_the_imported_default_h
 
     let fixture_home = db.default_household().await.unwrap();
     assert_eq!(fixture_home.slug, "fixture");
-    assert_eq!(db.groups().await.unwrap().iter().map(|g| g.slug.as_str()).collect::<Vec<_>>(), vec!["fixture"], "the empty Home group is gone");
-    assert_eq!(db.households().await.unwrap().len(), 1);
+    assert_eq!(db.groups().await.unwrap().iter().map(|g| g.slug.as_str()).collect::<Vec<_>>(), vec!["fixture", "fixture-two"], "the empty Home group is gone");
+    assert_eq!(db.households().await.unwrap().len(), 2);
     let after = db.user(admin.id).await.unwrap();
     assert_eq!((after.household_id, after.group_id, after.role.as_str()), (fixture_home.id, fixture_home.group_id, "admin"));
     let sc = mealier::Scope::from(&db.session_user(&cookie).await.unwrap().expect("their session survives the import"));
-    assert_eq!(db.list_recipes(&sc, true, None).await.unwrap().len(), 2, "and sees what was imported");
+    assert_eq!(db.list_recipes(&sc, true, None).await.unwrap().len(), 3, "and sees what was imported");
     assert_eq!(db.users().await.unwrap().len(), 3, "two imported users and the local admin");
 }
 

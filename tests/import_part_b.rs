@@ -1,13 +1,13 @@
-//! The Mealie importer's household and user features (step 14, part B): favourites and ratings, recipe
-//! actions, foods on hand, tools owned and share links. The fixture has none of them (its copies of
-//! these tables are empty, and it has no `recipe_share_tokens` at all), so synthetic rows are injected
-//! into a copy of the zip.
+//! The Mealie importer's household and user features (step 14, part B), for the shapes the fixture does not
+//! hold (half-star rounding, strangers, odd action types, expired and unreadable tokens). The fixture's own
+//! favourite, rating, actions, foods on hand, tool and share token are tested in `import_fixture.rs`; here
+//! its rows of these tables are removed from the copy of the zip first, and synthetic rows are injected.
 //!
-//! The column names come from Mealie v3.28.0's models, not from rows: `UserToRecipe` (user_id, recipe_id,
-//! rating float, is_favorite), `GroupRecipeAction` (group_id, household_id, action_type, title, url),
-//! the `households_to_ingredient_foods` (household_id, food_id) and `households_to_tools` (household_id,
-//! tool_id) tables, and `RecipeShareTokenModel` (id, group_id, recipe_id, expires_at). A share token's
-//! value is its `id`, shown dashed in the URL.
+//! Columns, confirmed against the fixture's real rows: `users_to_recipes` (user_id, recipe_id, rating float,
+//! is_favorite), `recipe_actions` (group_id, household_id, action_type, title, url),
+//! `households_to_ingredient_foods` (household_id, food_id), `households_to_tools` (household_id,
+//! tool_id) and `recipe_share_tokens` (id, group_id, recipe_id, expires_at). A share token's value is its
+//! `id`, shown dashed in the URL.
 mod common;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -36,6 +36,14 @@ fn mutated(edit: impl Fn(&mut Value), files: &[(&str, &[u8])]) -> (tempfile::Tem
         let name = f.name().unwrap().to_string();
         if name == "database.json" {
             let mut v: Value = serde_json::from_slice(&bytes).unwrap();
+            for t in ["users_to_recipes", "recipe_actions", "households_to_ingredient_foods", "households_to_tools", "recipe_share_tokens"] {
+                v[t] = json!([]);
+            }
+            // The fixture's second user is in the second group. These tests need two users of one household.
+            for u in v["users"].as_array_mut().unwrap() {
+                u["group_id"] = json!("6a1a76f2eef844d7b079f8421d1d7b6d");
+                u["household_id"] = json!("bdd39ab8b477457a89bcdf4d68e12d0d");
+            }
             edit(&mut v);
             bytes = serde_json::to_vec(&v).unwrap();
         }
@@ -87,17 +95,6 @@ async fn user_scope(db: &Db, name: &str) -> Scope {
 
 async fn recipe_id(db: &Db, name: &str) -> i64 {
     db.list_recipes(&tenant(db).await, true, None).await.unwrap().into_iter().find(|r| r.name == name).unwrap().id
-}
-
-// ---------- the fixture has none ----------
-
-#[tokio::test]
-async fn the_fixture_alone_brings_none_of_them() {
-    let (db, report, _dir) = import(&fixture()).await;
-    assert_eq!((report.favourites, report.ratings, report.recipe_actions, report.foods_on_hand, report.tools_owned, report.share_links), (0, 0, 0, 0, 0, 0));
-    assert!(db.actions(&tenant(&db).await).await.unwrap().is_empty());
-    let n: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM user_recipes) + (SELECT count(*) FROM household_foods) + (SELECT count(*) FROM household_tools) + (SELECT count(*) FROM share_links)").fetch_one(db.pool()).await.unwrap();
-    assert_eq!(n, 0);
 }
 
 // ---------- favourites and ratings ----------

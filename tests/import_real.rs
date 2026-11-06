@@ -36,4 +36,10 @@ async fn the_real_backup_imports_with_matching_counts() {
     assert_eq!(rows("units").await, want("ingredient_units"));
     assert_eq!(rows("groups").await, want("groups"));
     assert_eq!(rows("households").await, want("households"));
+    assert!(!report.skipped.iter().any(|l| l.contains("unknown table")), "{:?}", report.skipped);
+    for t in ["long_live_tokens", "ai_providers"] {
+        assert!(report.skipped.iter().any(|l| l.contains(t) && l.contains("skipped on purpose")), "no line for {t}: {:?}", report.skipped);
+    }
+    let text = format!("{report:?}");
+    assert!(!text.contains("sk-"), "the report carries no key");
 }

@@ -1,12 +1,12 @@
-//! The Mealie importer's notifiers and scheduled webhooks (step 15). The fixture has none (it has neither
-//! table), so synthetic rows are injected into a copy of the zip.
+//! The Mealie importer's notifiers and scheduled webhooks (step 15), for the shapes the fixture does not
+//! hold (other schemes, queries, credentials, bad times, every option). The fixture's own three notifiers
+//! and its scheduled webhook are tested in `import_fixture.rs`; here they are removed from the copy of the
+//! zip first, and synthetic rows are injected.
 //!
-//! Column names are from Mealie v3.28.0's models (`db/models/household/events.py` and `webhooks.py`) and
-//! its live `/openapi.json`: `group_events_notifiers` (id, name, enabled, apprise_url, group_id,
-//! household_id), `group_events_notifier_options` (id, event_notifier_id and one boolean per event) and
-//! `webhook_urls` (id, group_id, household_id, enabled, name, url, webhook_type, scheduled_time, and the
-//! unused legacy `time`). Not confirmed against a real backup row: how `scheduled_time` is written in
-//! `database.json` (read leniently as `HH:MM[:SS[.f]]`).
+//! Columns, confirmed against the fixture's real rows: `group_events_notifiers` (id, name, enabled,
+//! apprise_url, group_id, household_id), `group_events_notifier_options` (id, event_notifier_id and one
+//! boolean per event) and `webhook_urls` (id, group_id, household_id, enabled, name, url, webhook_type,
+//! scheduled_time as `HH:MM:SS`, and the unused legacy `time`).
 mod common;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -31,6 +31,9 @@ fn mutated(edit: impl Fn(&mut Value), files: &[(&str, &[u8])]) -> (tempfile::Tem
         let name = f.name().unwrap().to_string();
         if name == "database.json" {
             let mut v: Value = serde_json::from_slice(&bytes).unwrap();
+            for t in ["group_events_notifiers", "group_events_notifier_options", "webhook_urls"] {
+                v[t] = json!([]);
+            }
             edit(&mut v);
             bytes = serde_json::to_vec(&v).unwrap();
         }
@@ -380,13 +383,6 @@ async fn unusable_scheduled_webhooks_are_skipped_and_the_legacy_time_is_the_fall
     assert!(report.skipped.iter().any(|s| s.contains("BadUrl") && s.contains("ftp")));
     assert!(!text(&report).contains(SECRET));
     assert_eq!(hooks(&db).await[0].time_of_day.as_deref(), Some("21:10"));
-}
-
-#[tokio::test]
-async fn the_fixture_alone_has_neither() {
-    let (db, report, _d) = import(&fixture()).await;
-    assert_eq!((report.webhooks, report.scheduled_webhooks), (0, 0));
-    assert!(hooks(&db).await.is_empty());
 }
 
 #[tokio::test]

@@ -1,9 +1,14 @@
 //! The Mealie importer's recipe features (step 14, part A): ingredient section titles and reference ids,
-//! step titles and ingredient links, substitutions, notes, assets, extras and settings. The fixture
-//! has some of them; the tables it leaves empty get synthetic rows injected into a copy of the zip.
+//! step titles and ingredient links, substitutions, notes, assets, extras and settings, for the shapes
+//! the fixture does not hold (a link to a missing line, a missing, empty or oversize asset file, two
+//! notes, locked recipes). The fixture's own recipe C, with real rows of all of them, is tested in
+//! `import_fixture.rs`; here its rows of these tables are removed from the copy of the zip first, and
+//! synthetic rows are injected into recipe a.
 //!
-//! Column names of the empty tables are not in the fixture. The ones used below come from Mealie's
-//! OpenAPI schemas and its models, and are marked "unconfirmed" in the importer.
+//! The columns used below are the real ones (see the fixture): `recipe_ingredient_ref_link`
+//! (instruction_id, reference_id), `recipes_ingredients_substitutions` (ingredient_id, the integer id of
+//! the ingredient row; substitute_food_id; note), `notes`, `recipe_assets`, `api_extras` (recipee_id,
+//! key_name, value), `ingredient_food_extras`, `shopping_list_extras`, `shopping_list_item_extras`.
 mod common;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -37,6 +42,15 @@ fn mutated(edit: impl Fn(&mut Value), files: &[(&str, &[u8])]) -> (tempfile::Tem
         let name = f.name().unwrap().to_string();
         if name == "database.json" {
             let mut v: Value = serde_json::from_slice(&bytes).unwrap();
+            for t in [
+                "notes", "recipe_assets", "recipe_note_ref_link", "recipe_ingredient_ref_link", "recipes_ingredients_substitutions", "ingredient_foods_substitutions",
+                "ingredient_food_extras", "shopping_list_extras", "shopping_list_item_extras", "api_extras",
+            ] {
+                v[t] = json!([]);
+            }
+            for step in v["recipe_instructions"].as_array_mut().unwrap() {
+                step["summary"] = Value::Null;
+            }
             edit(&mut v);
             bytes = serde_json::to_vec(&v).unwrap();
         }
@@ -107,9 +121,9 @@ fn features(v: &mut Value) {
     push(v, "recipe_ingredient_ref_link", json!({"id": 2, "instruction_id": INS[0], "reference_id": REF[1]}));
     push(v, "recipe_ingredient_ref_link", json!({"id": 3, "instruction_id": INS[2], "reference_id": REF[0]}));
     push(v, "recipe_ingredient_ref_link", json!({"id": 4, "instruction_id": INS[2], "reference_id": "ffffffffffffffffffffffffffffffff"}));
-    // substitutions, by the ingredient's integer id and by its reference id
+    // substitutions, by the ingredient row's integer id (18 is the first line of recipe a, 20 the third)
     push(v, "recipes_ingredients_substitutions", json!({"id": 1, "ingredient_id": 18, "substitute_food_id": SALT, "note": "if no flour"}));
-    push(v, "recipes_ingredients_substitutions", json!({"id": 2, "reference_id": REF[2], "substitute_food_id": FLOUR, "note": null}));
+    push(v, "recipes_ingredients_substitutions", json!({"id": 2, "ingredient_id": 20, "substitute_food_id": FLOUR, "note": null}));
     push(v, "notes", json!({"id": "n1", "recipe_id": A, "title": "Tip", "text": "Salt late"}));
     push(v, "notes", json!({"id": "n2", "recipe_id": A, "title": "", "text": "Second"}));
     push(v, "recipe_note_ref_link", json!({"id": 1, "instruction_id": INS[0], "reference_id": "n1"}));

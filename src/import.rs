@@ -19,6 +19,25 @@ use crate::{Db, Dimension, Error, Result};
 /// `alembic_version` of Mealie v3.28.0, the only schema this importer reads.
 const MEALIE_SCHEMA: &str = "3527efeeec34";
 
+/// Every Mealie v3.28 table the importer reads (imported, or read to put a line in the report). A table in
+/// the backup that is in neither this list nor `SKIPPED_TABLES` gets an "unknown table" line if it has rows.
+const MAPPED_TABLES: &[&str] = &[
+    "groups", "group_preferences", "households", "household_preferences", "users", "ingredient_units", "ingredient_units_aliases", "multi_purpose_labels", "ingredient_foods",
+    "ingredient_foods_aliases", "ingredient_food_extras", "ingredient_foods_substitutions", "households_to_ingredient_foods", "households_to_tools", "tags", "categories", "tools", "recipes",
+    "recipes_to_tags", "recipes_to_categories", "recipes_to_tools", "recipes_ingredients", "recipes_ingredients_substitutions", "recipe_instructions", "recipe_ingredient_ref_link",
+    "recipe_note_ref_link", "recipe_nutrition", "recipe_settings", "notes", "recipe_assets", "api_extras", "recipe_timeline_events", "recipe_comments", "households_to_recipes", "group_meal_plans",
+    "cookbooks", "cookbooks_to_tags", "cookbooks_to_categories", "cookbooks_to_tools", "group_meal_plan_rules", "plan_rules_to_tags", "plan_rules_to_categories", "plan_rules_to_households",
+    "shopping_lists", "shopping_list_items", "shopping_list_item_recipe_reference", "shopping_list_recipe_reference", "shopping_lists_multi_purpose_labels", "shopping_list_extras",
+    "shopping_list_item_extras", "users_to_recipes", "recipe_actions", "recipe_share_tokens", "group_events_notifiers", "group_events_notifier_options", "webhook_urls",
+    "alembic_version",
+];
+
+/// The spec's "Skipped on purpose": secrets, one-time links, job history, the version table, AI providers.
+const SKIPPED_TABLES: &[&str] = &[
+    "long_live_tokens", "invite_tokens", "password_reset_tokens", "server_tasks", "group_reports", "report_entries", "group_data_exports", "ai_providers", "ai_provider_settings",
+    "ai_provider_headers", "ai_provider_params", "group_to_categories",
+];
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ImportReport {
     pub groups: usize,
@@ -174,6 +193,7 @@ async fn require_empty(tx: &mut Tx<'_>) -> Result<Option<i64>> {
 pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Result<ImportReport> {
     let (b, mut archive) = read_backup(zip)?;
     let mut report = ImportReport::default();
+    check_tables(&b, &mut report);
     let images = prepare_images(&b, &mut archive, &mut report).await?;
     let assets = prepare_assets(&b, &mut archive, &mut report)?;
     let mut tx = db.pool.begin().await?;
@@ -209,6 +229,23 @@ pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Res
     }
     tx.commit().await?;
     Ok(report)
+}
+
+/// One report line for each table with rows that is skipped on purpose, and one for each table the importer does not know.
+/// Only names and row counts: skipped tables hold secrets.
+fn check_tables(b: &Backup, report: &mut ImportReport) {
+    for (table, rows) in &b.0 {
+        let n = rows.as_array().map_or(0, Vec::len);
+        let rows = format!("{n} row{}", if n == 1 { "" } else { "s" });
+        if n == 0 || MAPPED_TABLES.contains(&table.as_str()) {
+            continue;
+        }
+        if SKIPPED_TABLES.contains(&table.as_str()) {
+            report.skipped.push(format!("table {table} ({rows}) is skipped on purpose"));
+        } else {
+            report.skipped.push(format!("unknown table {table} ({rows}) is not imported"));
+        }
+    }
 }
 
 /// Mealie's `{first_day_of_week, private_*, ...}` row as the columns mealier reads plus the rest as JSON.
@@ -349,11 +386,11 @@ async fn import_units_and_foods(tx: &mut Tx<'_>, b: &Backup, report: &mut Import
 }
 
 /// Mealie's `<owner>_extras` rows (`key_name`, `value`) as the JSON object kept in the owner's `extras` column, by owner id.
-/// The owner column's name is in `owner_keys`: the fixture has these tables empty, so the names are Mealie's model names, unconfirmed.
-fn extras_by_owner(b: &Backup, table: &str, owner_keys: &[&str]) -> HashMap<String, std::collections::BTreeMap<String, String>> {
+/// The owner column is `ingredient_food_id`, `shopping_list_id`, `shopping_list_item_id`, and (a typo in Mealie) `recipee_id`.
+fn extras_by_owner(b: &Backup, table: &str, owner_key: &str) -> HashMap<String, std::collections::BTreeMap<String, String>> {
     let mut out: HashMap<String, std::collections::BTreeMap<String, String>> = HashMap::new();
     for r in b.rows(table) {
-        let (Some(o), Some(k)) = (owner(r, owner_keys), s(r, "key_name")) else { continue };
+        let (Some(o), Some(k)) = (s(r, owner_key), s(r, "key_name")) else { continue };
         let v = match r.get("value") {
             Some(Value::String(v)) => v.clone(),
             Some(Value::Null) | None => String::new(),
@@ -366,12 +403,18 @@ fn extras_by_owner(b: &Backup, table: &str, owner_keys: &[&str]) -> HashMap<Stri
 
 /// Food extras and substitutions (`ingredient_food_extras`, `ingredient_foods_substitutions`).
 async fn import_food_features(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
-    for (uuid, extras) in extras_by_owner(b, "ingredient_food_extras", &["ingredient_food_id", "food_id"]) {
+    for (uuid, extras) in extras_by_owner(b, "ingredient_food_extras", "ingredient_food_id") {
         let food = local(tx, "food", &uuid).await?;
         sqlx::query("UPDATE foods SET extras = ? WHERE id = ?").bind(serde_json::to_string(&check_extras(extras)?)?).bind(food).execute(&mut **tx).await?;
     }
     for r in b.rows("ingredient_foods_substitutions") {
-        let (food, sub) = (local(tx, "food", id(r, "food_id")?).await?, local(tx, "food", id(r, "substitute_food_id")?).await?);
+        let food = local(tx, "food", id(r, "food_id")?).await?;
+        // Mealie allows a note with no substitute food ("or any syrup"); a mealier substitution is a food.
+        let Some(substitute) = s(r, "substitute_food_id") else {
+            report.skipped.push(format!("a substitution of food {} has no substitute food (note only: {:?}); it was not imported", id(r, "food_id")?, s(r, "note").unwrap_or_default()));
+            continue;
+        };
+        let sub = local(tx, "food", substitute).await?;
         let groups: Vec<i64> = sqlx::query_scalar("SELECT group_id FROM foods WHERE id IN (?, ?)").bind(food).bind(sub).fetch_all(&mut **tx).await?;
         if groups.len() == 2 && groups[0] != groups[1] {
             return Err(Error::Validation("backup food substitution joins foods of two groups".into()));
@@ -440,7 +483,7 @@ impl PreparedAsset {
 }
 
 /// Each recipe's attachments (`recipe_assets` rows, files under `data/recipes/<id>/assets/`), keyed by the
-/// recipe's Mealie id. Columns `name`, `icon`, `file_name` come from Mealie's `RecipeAsset` schema (the fixture's table is empty: unconfirmed).
+/// recipe's Mealie id. Columns: `recipe_id`, `name`, `icon`, `file_name`.
 /// A file that is missing, empty or over the 20 MB limit is reported and left out.
 fn prepare_assets(b: &Backup, archive: &mut ZipArchive<File>, report: &mut ImportReport) -> Result<HashMap<String, Vec<PreparedAsset>>> {
     use sha2::{Digest, Sha256};
@@ -496,20 +539,9 @@ fn settings_of(b: &Backup, recipe: &str) -> Settings {
     }
 }
 
-/// True when a link or substitution row's owner column (any of `keys`) names this ingredient row, by its integer `id` or its `reference_id`.
-fn names_ingredient(r: &MRow, keys: &[&str], ingredient: &MRow) -> bool {
-    keys.iter().filter_map(|k| r.get(*k)).any(|v| {
-        let text = match v {
-            Value::String(t) => t.clone(),
-            Value::Number(n) => n.to_string(),
-            _ => return false,
-        };
-        ingredient.get("id").is_some_and(|i| match i {
-            Value::String(t) => *t == text,
-            Value::Number(n) => n.to_string() == text,
-            _ => false,
-        }) || s(ingredient, "reference_id") == Some(text.as_str())
-    })
+/// True when a substitution row's `ingredient_id` (the integer `id` of a `recipes_ingredients` row) names this ingredient row.
+fn names_ingredient(r: &MRow, ingredient: &MRow) -> bool {
+    matches!((r.get("ingredient_id"), ingredient.get("id")), (Some(a), Some(b)) if a == b)
 }
 
 async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, images: &HashMap<String, Processed>, assets: &HashMap<String, Vec<PreparedAsset>>, report: &mut ImportReport) -> Result<()> {
@@ -517,7 +549,7 @@ async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, images: &HashMap<String, Pr
     let categories = vocabulary(tx, b, "categories", "categories", "category").await?;
     let tools = vocabulary(tx, b, "tools", "tools", "tool").await?;
     (report.tags, report.categories, report.tools) = (tags.len(), categories.len(), tools.len());
-    let recipe_extras = extras_by_owner(b, "api_extras", &["recipee_id", "recipe_id"]);
+    let recipe_extras = extras_by_owner(b, "api_extras", "recipee_id");
 
     let mut dropped_nutrition = false;
     let mut dropped_summaries = 0;
@@ -537,9 +569,9 @@ async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, images: &HashMap<String, Pr
                 note,
             });
             // Mealie's reference id is what its instructions link to; it becomes the line's id. Substitutions name
-            // the ingredient by its integer `id` or its `reference_id` (column names unconfirmed: the fixture's table is empty).
+            // the ingredient by its integer `id`.
             let mut substitutions = Vec::new();
-            for sub in b.rows("recipes_ingredients_substitutions").into_iter().filter(|x| names_ingredient(x, &["ingredient_id", "recipe_ingredient_id", "recipes_ingredients_id", "reference_id"], i)) {
+            for sub in b.rows("recipes_ingredients_substitutions").into_iter().filter(|x| names_ingredient(x, i)) {
                 let food = match s(sub, "substitute_food_id") {
                     Some(f) => Some(sqlx::query_scalar::<_, String>("SELECT name FROM foods WHERE id = ?").bind(local(tx, "food", f).await?).fetch_one(&mut **tx).await?),
                     None => None,
@@ -832,7 +864,8 @@ async fn import_cookbooks(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport
 /// Meal-plan rules: day and meal, the filter (plus legacy tag and category links), and the households
 /// the rule is limited to. A day or meal mealier has no word for is reported and the rule left out.
 async fn import_rules(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
-    const RULE_KEYS: [&str; 3] = ["group_plan_rule_id", "plan_rule_id", "rule_id"];
+    // `plan_rules_to_households` and `_categories` name the rule `group_plan_rule_id`, `_tags` names it `plan_rule_id` (Mealie's models).
+    const RULE_KEYS: [&str; 2] = ["group_plan_rule_id", "plan_rule_id"];
     for r in b.rows("group_meal_plan_rules") {
         let uuid = id(r, "id")?;
         let group = local(tx, "group", id(r, "group_id")?).await?;
@@ -859,8 +892,12 @@ async fn import_rules(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) ->
             .execute(&mut **tx)
             .await?
             .last_insert_rowid();
-        for h in b.rows("plan_rules_to_households").into_iter().filter(|h| owner(h, &RULE_KEYS) == Some(uuid)) {
-            let household = local(tx, "household", id(h, "household_id")?).await?;
+        // The household a rule belongs to is its own `household_id` column (a v3 rule is per household); the
+        // legacy `plan_rules_to_households` table can add more.
+        let own = s(r, "household_id").map(|h| (h, ()));
+        let legacy = b.rows("plan_rules_to_households").into_iter().filter(|h| owner(h, &RULE_KEYS) == Some(uuid)).map(|h| id(h, "household_id").map(|h| (h, ()))).collect::<Result<Vec<_>>>()?;
+        for (h, ()) in own.into_iter().chain(legacy) {
+            let household = local(tx, "household", h).await?;
             same_group(tx, "households", household, group, "meal-plan rule's household").await?;
             sqlx::query("INSERT OR IGNORE INTO meal_plan_rule_households (rule_id, household_id) VALUES (?, ?)").bind(lid).bind(household).execute(&mut **tx).await?;
         }
@@ -920,12 +957,12 @@ async fn import_shopping(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport)
         same_group(tx, "labels", label, group, "shopping list's label order").await?;
         sqlx::query("INSERT OR REPLACE INTO shopping_list_labels (list_id, label_id, position) VALUES (?, ?, ?)").bind(list).bind(label).bind(p.get("position").and_then(Value::as_i64).unwrap_or(0)).execute(&mut **tx).await?;
     }
-    // Extras (`key_name`, `value`; owner columns named after the model: unconfirmed, the fixture's tables are empty).
-    for (uuid, extras) in extras_by_owner(b, "shopping_list_extras", &["shopping_list_id"]) {
+    // Extras (`key_name`, `value`).
+    for (uuid, extras) in extras_by_owner(b, "shopping_list_extras", "shopping_list_id") {
         let list = local(tx, "shopping_list", &uuid).await?;
         sqlx::query("UPDATE shopping_lists SET extras = ? WHERE id = ?").bind(serde_json::to_string(&check_extras(extras)?)?).bind(list).execute(&mut **tx).await?;
     }
-    for (uuid, extras) in extras_by_owner(b, "shopping_list_item_extras", &["shopping_list_item_id"]) {
+    for (uuid, extras) in extras_by_owner(b, "shopping_list_item_extras", "shopping_list_item_id") {
         let item = local(tx, "shopping_list_item", &uuid).await?;
         sqlx::query("UPDATE shopping_list_items SET extras = ? WHERE id = ?").bind(serde_json::to_string(&check_extras(extras)?)?).bind(item).execute(&mut **tx).await?;
     }
@@ -944,7 +981,7 @@ fn utc(ts: &str) -> Option<String> {
 }
 
 /// Favourites and ratings, recipe actions, foods on hand, tools owned and share links. Column names are
-/// from Mealie v3.28.0's models (the fixture's tables are empty): see `tests/import_part_b.rs`.
+/// from Mealie v3.28.0's models and confirmed against a real backup (`tests/import_fixture.rs`).
 async fn import_household_features(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
     // A favourite or a rating belongs to a user, and the recipe must be in the user's group.
     for r in b.rows("users_to_recipes") {

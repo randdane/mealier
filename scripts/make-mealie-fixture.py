@@ -5,10 +5,14 @@ Usage: python3 -I scripts/make-mealie-fixture.py INPUT.zip [OUTPUT.zip]
 OUTPUT defaults to tests/fixtures/mealie_v3.28.0.zip (relative to the repo).
 
 Keeps recipes named "mealier-fixture*" and everything hanging off them, all
-foods/units/aliases/labels, fake users. Drops tokens, AI providers, secrets,
-share/invite tokens, and image files of other recipes. Any table this script
-does not know about must be empty, or it stops. Before writing, it checks the
-output for every sensitive value found in the input. Stdlib only.
+foods/units/aliases/labels, fake users, and the fixture's notifiers, scheduled
+webhook, recipe actions, meal-plan rules and share token. Drops API tokens, AI
+providers, secrets, invite and password-reset tokens, and image files of other
+recipes. The share token's value (a read link to a fixture recipe on production)
+is replaced by a fake one; notifier and webhook URLs must already be fakes, or it
+stops. Any table this script does not know about must be empty, or it stops.
+Before writing, it checks the output for every sensitive value found in the
+input. Stdlib only.
 """
 import json, sys, zipfile
 from pathlib import Path
@@ -24,17 +28,22 @@ KEEP_ALL = {  # copied as is
 }
 DROP = {  # removed entirely
     "long_live_tokens", "ai_providers", "ai_provider_settings", "ai_provider_headers",
-    "ai_provider_params", "invite_tokens", "password_reset_tokens", "recipe_share_tokens",
-    "webhook_urls", "api_extras", "server_tasks", "report_entries", "group_reports",
-    "group_data_exports", "group_events_notifiers", "group_events_notifier_options",
+    "ai_provider_params", "invite_tokens", "password_reset_tokens",
+    "server_tasks", "report_entries", "group_reports", "group_data_exports",
 }
+AFTER = {"recipe_ingredient_ref_link", "recipe_note_ref_link", "recipes_ingredients_substitutions", "households_to_tools",
+         "group_events_notifier_options"}
+FAKE_SHARE_TOKEN = "fa4e" * 8  # replaces the real one: 32 hex, the form Mealie stores
+FAKE_URLS = ("ntfys://ntfy.example.invalid/", "json://example.invalid/", "discord://0000/", "https://example.invalid/")
 BY_RECIPE = {  # rows with a recipe_id column, kept when the recipe is kept
     "recipe_instructions", "recipe_nutrition", "recipe_settings", "recipe_timeline_events",
     "recipe_comments", "recipes_ingredients", "recipes_to_categories", "recipes_to_tags",
     "recipes_to_tools", "households_to_recipes", "users_to_recipes", "recipe_assets",
-    "recipe_actions", "notes", "shopping_list_recipe_reference",
+    "notes", "shopping_list_recipe_reference", "recipe_share_tokens",
 }
-BY_NAME = {"tags", "categories", "tools", "cookbooks"}  # kept when named "mealier-fixture*"
+# kept when named "mealier-fixture*" (title for recipe actions); meal-plan rules have no name: kept if
+# their filter text mentions a kept tag or category, see main()
+BY_NAME = {"tags", "categories", "tools", "cookbooks", "group_events_notifiers", "webhook_urls"}
 SENSITIVE_COLS = ("token", "secret", "key", "password")  # users columns dropped (password blanked)
 
 
@@ -52,6 +61,8 @@ def main():
             bad.add(u["username"])
     for t in db.get("long_live_tokens", []):
         bad.add(t.get("token"))
+    for t in db.get("recipe_share_tokens", []):
+        bad |= {t["id"], f"{t['id'][:8]}-{t['id'][8:12]}-{t['id'][12:16]}-{t['id'][16:20]}-{t['id'][20:]}"}
     for t in db.get("ai_providers", []):
         bad.add(t.get("api_key"))
     bad.discard(None); bad.discard("")
@@ -72,6 +83,14 @@ def main():
         elif t == "shopping_lists":
             refd = {r["shopping_list_id"] for r in db["shopping_list_recipe_reference"] if r["recipe_id"] in keep}
             rows = [r for r in rows if r["name"].startswith(P) or r["id"] in refd]
+        elif t == "recipe_actions":
+            rows = [r for r in rows if r["title"].startswith(P)]
+        elif t == "api_extras":
+            rows = [r for r in rows if r["recipee_id"] in keep]
+        elif t in AFTER:
+            continue  # filtered below, once what they hang off is known
+        elif t in ("group_meal_plan_rules", "plan_rules_to_tags", "plan_rules_to_categories", "plan_rules_to_households"):
+            pass  # rules are filtered below, once the tags and categories are known
         elif t in KEEP_ALL:
             pass
         elif t in ("cookbooks_to_categories", "cookbooks_to_tags", "cookbooks_to_tools"):
@@ -82,6 +101,44 @@ def main():
         elif rows:
             sys.exit(f"table {t!r} has {len(rows)} rows and this script does not know it")
         out_db[t] = rows
+
+    for t in sorted(AFTER):
+        rows = db[t]
+        if t in ("recipe_ingredient_ref_link", "recipe_note_ref_link"):
+            ids = {r["id"] for r in out_db["recipe_instructions"]}
+            rows = [r for r in rows if r["instruction_id"] in ids]
+        elif t == "recipes_ingredients_substitutions":
+            ids = {r["id"] for r in out_db["recipes_ingredients"]}
+            rows = [r for r in rows if r["ingredient_id"] in ids]
+        elif t == "households_to_tools":
+            ids = {r["id"] for r in out_db["tools"]}
+            rows = [r for r in rows if r["tool_id"] in ids]
+        else:
+            ids = {r["id"] for r in out_db["group_events_notifiers"]}
+            rows = [r for r in rows if r["event_notifier_id"] in ids]
+        out_db[t] = rows
+
+    # Meal-plan rules: a fixture's rule is one whose filter names a kept tag or category.
+    named = {r["id"] for t in ("tags", "categories") for r in out_db[t]}
+    dashed = lambda i: f"{i[:8]}-{i[8:12]}-{i[12:16]}-{i[16:20]}-{i[20:]}"
+    out_db["group_meal_plan_rules"] = [r for r in db["group_meal_plan_rules"] if any(dashed(i) in r["query_filter_string"] for i in named)]
+    rule_ids = {r["id"] for r in out_db["group_meal_plan_rules"]}
+    for t in ("plan_rules_to_tags", "plan_rules_to_categories", "plan_rules_to_households"):
+        out_db[t] = [r for r in db[t] if (r.get("group_plan_rule_id") or r.get("plan_rule_id")) in rule_ids]
+
+    # The share token: its id is the secret. Same fake everywhere it could appear.
+    real_tokens = {r["id"] for r in db["recipe_share_tokens"]}
+    for r in out_db["recipe_share_tokens"]:
+        r["id"] = FAKE_SHARE_TOKEN
+    if len(out_db["recipe_share_tokens"]) > 1:
+        sys.exit("more than one share token kept: they would all get the same fake id")
+
+    for r in out_db["group_events_notifiers"]:
+        if not r["apprise_url"].startswith(FAKE_URLS):
+            sys.exit(f"notifier {r['name']!r} has an address that is not a known fake")
+    for r in out_db["webhook_urls"]:
+        if not r["url"].startswith(FAKE_URLS):
+            sys.exit(f"webhook {r['name']!r} has an address that is not a known fake")
 
     lists = {r["id"] for r in out_db["shopping_lists"]}
     items = [r for r in db["shopping_list_items"] if r["shopping_list_id"] in lists]
@@ -94,8 +151,11 @@ def main():
     out_db["shopping_lists_multi_purpose_labels"] = [
         r for r in db["shopping_lists_multi_purpose_labels"] if r["shopping_list_id"] in lists]
 
+    # The admin's group and household keep "Fixture"; the second group (and its household) is "Fixture Two".
+    admin_group = next(u["group_id"] for u in out_db["users"] if u["admin"])
     for g in out_db["groups"] + out_db["households"]:
-        g["name"], g["slug"] = "Fixture", "fixture"
+        first = g["id"] == admin_group or g.get("group_id") == admin_group
+        g["name"], g["slug"] = ("Fixture", "fixture") if first else ("Fixture Two", "fixture-two")
     fakes = ["fixture-admin", "fixture-user"]
     for i, u in enumerate(sorted(out_db["users"], key=lambda u: not u["admin"])):
         name = fakes[i] if i < len(fakes) else f"fixture-user-{i}"
@@ -107,7 +167,7 @@ def main():
     # No column named like a secret anywhere, apart from the blanked users.password.
     for t, rows in out_db.items():
         for c in (rows[0] if rows else {}):
-            if any(s in c for s in SENSITIVE_COLS) and (t, c) != ("users", "password"):
+            if any(s in c for s in SENSITIVE_COLS) and (t, c) != ("users", "password") and c != "key_name":  # key_name: extras
                 sys.exit(f"sensitive column {t}.{c} survived")
 
     blob = json.dumps(out_db, sort_keys=True, indent=1)

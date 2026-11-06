@@ -1,5 +1,12 @@
 //! The Mealie importer's cookbooks and meal-plan rules (step 13): filters kept verbatim, parsed and
 //! mapped to mealier ids; legacy tag/category/tool links merged in; unreadable filters reported.
+//!
+//! The fixture's three cookbooks and two rules (real rows; tested in `import_fixture.rs`) are cut down
+//! here to its first cookbook and no rules, so the synthetic ones are counted on their own. The legacy
+//! link tables (`cookbooks_to_*`, `plan_rules_to_*`) cannot be filled through Mealie v3.28's API, so
+//! they stay synthetic; their column names are from Mealie's models: `cookbook_id` with `tag_id`,
+//! `category_id` or `tool_id`; `group_plan_rule_id` (`plan_rule_id` in `plan_rules_to_tags`) with
+//! `household_id`, `category_id` or `tag_id`.
 mod common;
 use std::path::{Path, PathBuf};
 
@@ -30,6 +37,8 @@ fn mutated(edit: impl Fn(&mut Value)) -> (tempfile::TempDir, PathBuf) {
         let name = f.name().unwrap().to_string();
         if name == "database.json" {
             let mut v: Value = serde_json::from_slice(&bytes).unwrap();
+            v["cookbooks"].as_array_mut().unwrap().retain(|c| c["name"] == "mealier-fixture-cookbook");
+            v["group_meal_plan_rules"] = json!([]);
             edit(&mut v);
             bytes = serde_json::to_vec(&v).unwrap();
         }
@@ -71,16 +80,18 @@ fn cookbook(id: &str, name: &str, filter: &str) -> Value {
 }
 
 fn rule(id: &str, day: &str, entry: &str, filter: &str) -> Value {
-    json!({"id": id, "group_id": FIXTURE_GROUP, "household_id": FIXTURE_HOUSEHOLD, "day": day, "entry_type": entry, "query_filter_string": filter})
+    // No `household_id`: real rows always have one, and the importer limits the rule to it (tested in
+    // `import_fixture.rs`); here the household limit comes from `plan_rules_to_households` alone.
+    json!({"id": id, "group_id": FIXTURE_GROUP, "day": day, "entry_type": entry, "query_filter_string": filter})
 }
 
 #[tokio::test]
 async fn the_fixtures_cookbook_keeps_its_filter_and_lists_the_recipe_the_tag_selects() {
     let (db, report, _dir) = import(&fixture()).await;
     let sc = tenant(&db).await;
-    assert_eq!(report.cookbooks, 1);
+    assert_eq!(report.cookbooks, 3, "the fixture's three");
     assert_eq!(skipped(&report, "cookbook"), 0, "{:?}", report.skipped);
-    let c = db.cookbooks(&sc).await.unwrap().remove(0);
+    let c = db.cookbooks(&sc).await.unwrap().into_iter().find(|c| c.name == "mealier-fixture-cookbook").unwrap();
     assert_eq!((c.name.as_str(), c.description.as_str(), c.slug.as_str(), c.position, c.public, c.filter_supported), ("mealier-fixture-cookbook", "fixture", "mealier-fixture-cookbook", 1, false, true));
     assert_eq!(c.query_filter, format!(r#"tags.id IN ["{TAG1}"]"#), "Mealie's string, verbatim");
     assert_eq!(names_in(&db, &sc, "mealier-fixture-cookbook").await, ["mealier-fixture-recipe-a"]);
@@ -107,8 +118,8 @@ async fn richer_filters_are_mapped_and_evaluated() {
     // recipe-a has a made-it event in the fixture, so lastMade is not null
     assert_eq!(names_in(&db, &sc, "Not made").await, Vec::<String>::new());
     assert_eq!(names_in(&db, &sc, "By name").await.len(), 2);
-    assert_eq!(names_in(&db, &sc, "Without").await, ["mealier-fixture-recipe-b"]);
-    assert_eq!(names_in(&db, &sc, "All").await.len(), 2);
+    assert_eq!(names_in(&db, &sc, "Without").await, ["mealier-fixture-recipe-b", "mealier-fixture-recipe-c"], "recipe c has only tag 2");
+    assert_eq!(names_in(&db, &sc, "All").await.len(), 3);
     let all = db.cookbooks(&sc).await.unwrap();
     assert!(all.iter().all(|c| c.filter_supported));
 }
@@ -142,7 +153,7 @@ async fn an_id_the_backup_does_not_contain_matches_nothing_and_is_reported() {
     let sc = tenant(&db).await;
     assert_eq!(skipped(&report, "11111111-2222-3333-4444-555555555555"), 2, "{:?}", report.skipped);
     assert!(names_in(&db, &sc, "Ghost").await.is_empty());
-    assert_eq!(names_in(&db, &sc, "Not ghost").await.len(), 2);
+    assert_eq!(names_in(&db, &sc, "Not ghost").await.len(), 3, "all three recipes");
 }
 
 #[tokio::test]
@@ -192,7 +203,7 @@ async fn rules_come_over_with_day_slot_filter_and_households_and_suggest_from_th
         push(v, "plan_rules_to_households", json!({"group_plan_rule_id": "r1", "household_id": FIXTURE_HOUSEHOLD}));
         push(v, "group_meal_plan_rules", rule("r2", "unset", "unset", ""));
         push(v, "group_meal_plan_rules", rule("r3", "unset", "lunch", ""));
-        push(v, "plan_rules_to_tags", json!({"group_plan_rule_id": "r3", "tag_id": TAG2.replace('-', "")}));
+        push(v, "plan_rules_to_tags", json!({"plan_rule_id": "r3", "tag_id": TAG2.replace('-', "")}));
         push(v, "plan_rules_to_categories", json!({"group_plan_rule_id": "r3", "category_id": CAT2.replace('-', "")}));
     });
     let (db, report, _d) = import(&path).await;
@@ -212,12 +223,12 @@ async fn rules_come_over_with_day_slot_filter_and_households_and_suggest_from_th
     // Tuesday lunch: slot rule r3 (tag 2 and category 2, which recipe-a has too)
     let pick = db.suggest(&sc, "2026-11-03", "lunch", &mut Rng::seeded(1)).await.unwrap().unwrap();
     assert_eq!(pick.name, "mealier-fixture-recipe-a");
-    // Tuesday dinner: only the catch-all, so either recipe
+    // Tuesday dinner: only the catch-all, so any recipe
     let mut seen = std::collections::BTreeSet::new();
     for seed in 0..30 {
         seen.insert(db.suggest(&sc, "2026-11-03", "dinner", &mut Rng::seeded(seed)).await.unwrap().unwrap().name);
     }
-    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen.len(), 3, "{seen:?}");
 }
 
 #[tokio::test]

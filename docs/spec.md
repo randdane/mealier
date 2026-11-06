@@ -498,13 +498,16 @@ multipart field `file`), and as `mealier export <out.zip>` and
 ## Migration from Mealie
 
 A one-time importer for **Mealie v3.28 backup zips only**, developed against a
-fixture built from fixture data in a real Mealie instance. It runs in one
+fixture built from fixture data in a real Mealie instance. Every table it maps was
+filled in that instance through Mealie's API, so the column names it reads are
+Mealie's own (the one exception is the empty legacy link tables, below). It runs in one
 transaction into a clean DB: all or nothing, plus a report of skipped records
 and referential-integrity checks. It is re-runnable. Cutover: compare counts and
 spot-check against Mealie, then point the vhost at mealier. Mealie's volume is
 kept until a later prune.
 
-Every table in a v3.28 backup is either mapped or skipped on purpose. Every group
+Every table in a v3.28 backup is either mapped or skipped on purpose; a table with rows
+that is neither gets an "unknown table" line in the report (name and row count only). Every group
 and household in the backup is imported; each record goes to its own group or
 household (a household-scoped record without a usable user goes to its group's
 first household), and the first household becomes the default. A backup whose
@@ -554,17 +557,31 @@ notifiers; scheduled webhooks.
 - Foods on hand and tools owned: `households_to_ingredient_foods` (`household_id`, `food_id`) and
   `households_to_tools` (`household_id`, `tool_id`). The old `on_hand` flags on foods and tools are
   deprecated in Mealie and are not read.
+- Meal-plan rules: `group_meal_plan_rules` has its own `household_id`, the household the rule belongs to
+  (a v3 rule is per household); the rule is limited to it. The legacy `plan_rules_to_households` can add more.
+- Substitutions: a recipe line's (`recipes_ingredients_substitutions`: `ingredient_id`, the integer id of the
+  ingredient row, `substitute_food_id`, `note`) may have a note and no food, and it is kept so. A food's
+  (`ingredient_foods_substitutions`) must name a food: one with only a note is reported and left out.
 - Share links: `recipe_share_tokens` (`id`, `group_id`, `recipe_id`, `expires_at`). The `id` is the
   token; the dashed form its URL shows is hashed, so old links keep working. Expiry is read as UTC;
   one that is not a date is reported and left out. Expired links are imported and answer 404.
-- The columns of these five tables are from Mealie v3.28.0's models: the fixture's copies are empty
-  (and `recipe_share_tokens` is dropped by the fixture script as a secret), so tests inject rows.
+- The legacy link tables `cookbooks_to_tags`/`_categories`/`_tools` (`cookbook_id` and `tag_id`,
+  `category_id` or `tool_id`) and `plan_rules_to_tags` (`plan_rule_id`), `_categories` and `_households`
+  (`group_plan_rule_id`) cannot be filled through Mealie v3.28's API (filters are strings now), so the fixture
+  holds none and their tests inject rows; the column names are from Mealie's models. If a backup has rows in
+  them they are ANDed onto the filter.
+- The fixture's share token is a fake value (`scripts/make-mealie-fixture.py` replaces the real one, which
+  opens a fixture recipe on the production Mealie), and its notifier and webhook addresses are fakes
+  (`example.invalid`).
 
-**Skipped on purpose, one report line each:** `long_live_tokens`,
-`invite_tokens`, `password_reset_tokens` (secrets and one-time links);
+**Skipped on purpose, one report line each (when the table has rows; name and row count only, never values):**
+`long_live_tokens`, `invite_tokens`, `password_reset_tokens` (secrets and one-time links);
 `server_tasks`, `group_reports`, `report_entries`, `group_data_exports`
-(Mealie's job history); `alembic_version` (used only for the version check);
-`ai_providers*` (mealier's LLM is configured by environment); user passwords.
+(Mealie's job history); `ai_providers`, `ai_provider_settings`, `ai_provider_headers`, `ai_provider_params`
+(mealier's LLM is configured by environment); `group_to_categories` (an unused link); user passwords.
+`alembic_version` is used only for the version check. Three tables are read only to put a line in the
+report: `recipe_note_ref_link` (note references on steps), `shopping_list_recipe_reference` (a list's own
+recipe references) and `households_to_recipes` (`last_made` with no made-it event).
 
 ## Deployment
 
@@ -583,27 +600,25 @@ one copy) with image hashes in snapshots, batch cook mode from the snapshot and
 remembered ticks, one quantity-range helper, export and restore, error mapping
 in one module with HTML error pages, `web.rs` split by page area, full recipe
 form. 12. Labels and shopping-list sections. 13. Cookbook filters and meal-plan
-rules. 15. Notifier events and scheduled webhooks (2026-11-06, not committed).
+rules. 14. Recipe features: assets, notes, sections, ingredient links, substitutions, extras and settings;
+favourites and ratings, recipe actions, foods on hand and tools owned, share links; and their importer mapping.
+Filter `rating` reads the caller's own rating (owner approved rewriting
+`tests/filter.rs::last_made_and_rating_read_the_callers_household`). 15. Notifier events and scheduled
+webhooks (not committed). 16. Fixture and importer coverage for every mapped table (not committed): the
+fixture holds real rows of every table Mealie's API can fill, and a test accounts for every table in it.
 
-Remaining, in order:
-
-14. Recipe features. Part A done (2026-11-06): assets, notes, sections, ingredient
-    links, substitutions, extras, settings and their importer mapping. Part B done
-    (2026-11-06): favourites and ratings, recipe actions, foods on hand and tools
-    owned, share links, and their importer mapping. Filter `rating` reads the caller's own rating
-    (owner approved rewriting `tests/filter.rs::last_made_and_rating_read_the_callers_household`).
-16. Fixture and importer coverage for every mapped table.
-17. Deploy (`stacks/mealier`).
+Remaining: 17. Deploy (`stacks/mealier`).
 
 ## STATUS
 
 2026-11-06.
 
-- Phase: step 14 done and committed; step 15 done, not committed (notifier events, scheduled webhooks,
-  `mealier run-scheduled`, importer for notifiers and `webhook_urls`).
+- Phase: step 16 done, not committed (with 15). Fixture rebuilt from a real backup of production Mealie
+  with real rows for every table the API can fill; importer fixed where a guess was wrong; every table in
+  the fixture is imported or skipped on purpose, asserted against a literal list.
 - Blocked on the owner: nothing until step 17 (a GitHub repo, an Authentik application, and
   secrets).
-- Next: 16 without stopping unless a decision is needed.
-- Production Mealie still holds the `mealier-fixture` items and three extra
-  backups; `scripts/cleanup-mealie-fixture.py` removes the items after step 16
-  (step 16 adds more fixture data first).
+- Next: 17, deploy.
+- Production Mealie still holds the `mealier-fixture` items, a second group and household, a second user in
+  it, and the backups made along the way; `scripts/cleanup-mealie-fixture.py` (dry run by default)
+  removes them once the owner says so.
