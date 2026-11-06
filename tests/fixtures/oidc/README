@@ -1,0 +1,3 @@
+Test-only keys for tests/oidc.rs. They sign ID tokens for the in-test mock identity
+provider and protect nothing. rsa.pem (kid rsa1) and ec.pem (kid ec1) are published
+in jwks.json; rsa-other.pem is NOT published (a forger's key).

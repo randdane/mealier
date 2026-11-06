@@ -26,9 +26,21 @@ pub struct ErrorBody {
     start_batch, list_batches, get_batch, put_batch, add_line, finish_batch, add_photo, parse, import_url,
     get_plan, add_plan_entry, put_plan_entry, delete_plan_entry,
     get_lists, create_list, get_list, add_list_item, put_item, delete_item, list_add_recipe, list_add_batch,
-    list_webhooks, create_webhook, get_webhook, put_webhook, delete_webhook, test_webhook
-))]
+    list_webhooks, create_webhook, get_webhook, put_webhook, delete_webhook, test_webhook,
+    crate::login::me, crate::login::list_users, crate::login::disable_user, crate::login::enable_user
+), modifiers(&BearerScheme), security(("bearer" = [])))]
 struct ApiDoc;
+
+/// Declares the `Authorization: Bearer` scheme every /api route accepts.
+struct BearerScheme;
+
+impl utoipa::Modify for BearerScheme {
+    fn modify(&self, api: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+        let scheme = HttpBuilder::new().scheme(HttpAuthScheme::Bearer).description(Some("A per-user API token, created at /settings/tokens")).build();
+        api.components.get_or_insert_with(Default::default).add_security_scheme("bearer", SecurityScheme::Http(scheme));
+    }
+}
 
 async fn openapi() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
@@ -39,6 +51,9 @@ impl IntoResponse for Error {
         let (status, msg) = match &self {
             Error::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             Error::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
+            Error::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
+            Error::Forbidden(_) => (StatusCode::FORBIDDEN, self.to_string()),
+            Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
             other => {
                 eprintln!("mealier: {other}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
@@ -432,31 +447,28 @@ async fn list_add_batch(State(db): State<Db>, Path(id): Path<i64>, Json(b): Json
     Ok(Json(db.add_batch_to_list(id, b.batch_id).await?))
 }
 
-// step 8: admin only (all webhook config routes)
+// Admin only (`crate::Admin`); the guard middleware also refuses non-admins under /api/webhooks.
 #[utoipa::path(get, path = "/api/webhooks", responses((status = 200, description = "All webhooks", body = [Webhook])))]
-async fn list_webhooks(State(db): State<Db>) -> Result<Json<Vec<Webhook>>, Error> {
+async fn list_webhooks(_: crate::Admin, State(db): State<Db>) -> Result<Json<Vec<Webhook>>, Error> {
     Ok(Json(db.list_webhooks().await?))
 }
 
-// step 8: admin only
 #[utoipa::path(
     post, path = "/api/webhooks", request_body = WebhookInput,
     responses((status = 201, description = "Webhook created", body = Webhook), (status = 422, description = "Invalid webhook", body = ErrorBody))
 )]
-async fn create_webhook(State(db): State<Db>, Json(i): Json<WebhookInput>) -> Result<(StatusCode, Json<Webhook>), Error> {
+async fn create_webhook(_: crate::Admin, State(db): State<Db>, Json(i): Json<WebhookInput>) -> Result<(StatusCode, Json<Webhook>), Error> {
     Ok((StatusCode::CREATED, Json(db.create_webhook(i).await?)))
 }
 
-// step 8: admin only
 #[utoipa::path(
     get, path = "/api/webhooks/{id}", params(("id" = i64, Path, description = "Webhook id")),
     responses((status = 200, description = "The webhook", body = Webhook), (status = 404, description = "No such webhook", body = ErrorBody))
 )]
-async fn get_webhook(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Webhook>, Error> {
+async fn get_webhook(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<Webhook>, Error> {
     Ok(Json(db.get_webhook(id).await?))
 }
 
-// step 8: admin only
 #[utoipa::path(
     put, path = "/api/webhooks/{id}", params(("id" = i64, Path, description = "Webhook id")), request_body = WebhookInput,
     responses(
@@ -465,16 +477,15 @@ async fn get_webhook(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<W
         (status = 422, description = "Invalid webhook", body = ErrorBody),
     )
 )]
-async fn put_webhook(State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<WebhookInput>) -> Result<Json<Webhook>, Error> {
+async fn put_webhook(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>, Json(i): Json<WebhookInput>) -> Result<Json<Webhook>, Error> {
     Ok(Json(db.update_webhook(id, i).await?))
 }
 
-// step 8: admin only
 #[utoipa::path(
     delete, path = "/api/webhooks/{id}", params(("id" = i64, Path, description = "Webhook id")),
     responses((status = 204, description = "Webhook deleted"), (status = 404, description = "No such webhook", body = ErrorBody))
 )]
-async fn delete_webhook(State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
+async fn delete_webhook(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
     db.delete_webhook(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -488,7 +499,6 @@ struct TestOutcome {
     status: u16,
 }
 
-// step 8: admin only
 #[utoipa::path(
     post, path = "/api/webhooks/{id}/test", params(("id" = i64, Path, description = "Webhook id")),
     responses(
@@ -497,7 +507,7 @@ struct TestOutcome {
         (status = 422, description = "The receiver could not be reached", body = ErrorBody),
     )
 )]
-async fn test_webhook(State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<TestOutcome>, Error> {
+async fn test_webhook(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>) -> Result<Json<TestOutcome>, Error> {
     let status = db.send_test(id).await?;
     Ok(Json(TestOutcome { ok: (200..300).contains(&status), status }))
 }
@@ -523,6 +533,12 @@ pub fn router(state: AppState) -> Router {
 
 /// `router` with a chosen import service (config from the environment, or a test fetcher).
 pub fn router_with(state: AppState, import: ImportService) -> Router {
+    router_with_auth(state, import, crate::AuthConfig::default())
+}
+
+/// `router_with` and an explicit auth configuration (`AuthConfig::from_env()` in the binary).
+pub fn router_with_auth(state: AppState, import: ImportService, auth: crate::AuthConfig) -> Router {
+    let guard = crate::Guard { db: state.db.clone(), auth: Arc::new(crate::Auth::new(auth)) };
     Router::new()
         .route("/api/recipes/import", post(import_url))
         .route("/api/recipes", post(create).get(list))
@@ -549,7 +565,14 @@ pub fn router_with(state: AppState, import: ImportService) -> Router {
         .route("/api/webhooks/{id}", get(get_webhook).put(put_webhook).delete(delete_webhook))
         .route("/api/webhooks/{id}/test", post(test_webhook))
         .route("/api/openapi.json", get(openapi))
+        .route("/api/me", get(crate::login::me))
+        .route("/api/users", get(crate::login::list_users))
+        .route("/api/users/{id}/disable", post(crate::login::disable_user))
+        .route("/api/users/{id}/enable", post(crate::login::enable_user))
         .merge(crate::web::routes())
+        .merge(crate::login::routes())
         .layer(Extension(Arc::new(import)))
+        .layer(Extension(guard.auth.clone()))
+        .layer(axum::middleware::from_fn_with_state(guard, crate::guard::guard))
         .with_state(state)
 }

@@ -1,6 +1,10 @@
 use std::path::Path;
 
 pub mod api;
+mod auth;
+mod guard;
+mod login;
+mod oidc;
 mod batches;
 pub mod fetch;
 mod import;
@@ -12,6 +16,10 @@ mod units;
 mod webhooks;
 mod urlimport;
 mod web;
+pub use auth::*;
+pub use guard::AuthConfig;
+pub(crate) use guard::{Admin, Auth, CurrentUser, Guard, SessionUser};
+pub use oidc::*;
 pub use batches::*;
 pub use import::*;
 pub use parse::*;
@@ -30,6 +38,12 @@ pub enum Error {
     Validation(String),
     #[error("{0} not found")]
     NotFound(&'static str),
+    #[error("sign in required")]
+    Unauthorized,
+    #[error("{0}")]
+    Forbidden(String),
+    #[error("{0}")]
+    TooMany(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]

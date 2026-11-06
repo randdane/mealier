@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}API tokens - mealier{% endblock %}
+{% block content %}
+<h1>API tokens</h1>
+{% if let Some(c) = created %}
+<p role="status">Token <strong>{{ c.name }}</strong> created. Copy it now; it is not shown again.</p>
+<p><code>{{ c.secret }}</code></p>
+{% endif %}
+<p>Send a token as <code>Authorization: Bearer &lt;token&gt;</code> to <code>/api</code>. The API description is at <a href="/api/openapi.json">/api/openapi.json</a>.</p>
+<ul>
+{% for t in tokens %}
+  <li>
+    <strong>{{ t.name }}</strong> <small>created {{ t.created_at }}, {% if let Some(u) = t.last_used_at %}last used {{ u }}{% else %}never used{% endif %}</small>
+    <form method="post" action="/settings/tokens/{{ t.id }}/revoke" class="inline"><button type="submit" class="quiet">Revoke</button></form>
+  </li>
+{% else %}<li>None yet.</li>{% endfor %}
+</ul>
+<h2>Create</h2>
+<form method="post" action="/settings/tokens" class="stack">
+  <label>Name <input type="text" name="name" placeholder="phone shortcut" required></label>
+  <button type="submit">Create token</button>
+</form>
+{% endblock %}

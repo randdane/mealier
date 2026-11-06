@@ -1,3 +1,4 @@
+mod common;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -143,7 +144,7 @@ async fn serve() -> String {
 }
 
 async fn post_import(app: &axum::Router, url: &str) -> (u16, Value) {
-    let req = Request::builder().method("POST").uri("/api/recipes/import").header("content-type", "application/json").body(Body::from(json!({ "url": url }).to_string())).unwrap();
+    let req = Request::builder().method("POST").uri("/api/recipes/import").header("authorization", common::BEARER).header("content-type", "application/json").body(Body::from(json!({ "url": url }).to_string())).unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status().as_u16();
     (status, serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap())
@@ -155,6 +156,7 @@ async fn post_import_creates_the_recipe_and_stores_the_image() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open_memory().await.unwrap();
     let svc = ImportService::new(Fetcher::with_allow(loopback), Chain::build("jsonld,microdata", None).unwrap());
+    common::sign_in(&db).await;
     let app = api::router_with(api::AppState { db: db.clone(), images_dir: dir.path().to_path_buf() }, svc);
     let (status, body) = post_import(&app, &format!("{base}/r")).await;
     assert_eq!(status, 201, "{body}");
@@ -173,7 +175,9 @@ async fn post_import_creates_the_recipe_and_stores_the_image() {
 #[tokio::test]
 async fn post_import_with_the_default_fetcher_refuses_a_private_target() {
     let base = serve().await;
-    let app = api::router(api::AppState { db: Db::open_memory().await.unwrap(), images_dir: tempfile::tempdir().unwrap().keep() });
+    let db = Db::open_memory().await.unwrap();
+    common::sign_in(&db).await;
+    let app = api::router(api::AppState { db, images_dir: tempfile::tempdir().unwrap().keep() });
     let (status, body) = post_import(&app, &format!("{base}/r")).await;
     assert_eq!((status, body["error"].as_str().unwrap()), (422, "address is not allowed (private, loopback or internal)"));
 }

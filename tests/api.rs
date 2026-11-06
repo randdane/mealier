@@ -1,4 +1,5 @@
 use axum::Router;
+mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -7,14 +8,15 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 /// The router over `db`, with a throwaway images dir.
-fn router_for(db: Db) -> Router {
+async fn router_for(db: Db) -> Router {
+    common::sign_in(&db).await;
     api::router(api::AppState { db, images_dir: tempfile::tempdir().unwrap().keep() })
 }
 
 /// One request through the router. Returns the status and the JSON body
 /// (`Value::Null` when the body is empty).
 async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
-    let mut req = Request::builder().method(method).uri(uri);
+    let mut req = Request::builder().method(method).uri(uri).header("authorization", common::BEARER);
     let body = match body {
         Some(v) => {
             req = req.header("content-type", "application/json");
@@ -31,7 +33,7 @@ async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (St
 
 #[tokio::test]
 async fn post_recipes_returns_201_with_the_recipe() {
-    let app = router_for(Db::open_memory().await.unwrap());
+    let app = router_for(Db::open_memory().await.unwrap()).await;
     let (status, body) = send(&app, "POST", "/api/recipes", Some(json!({"name": "Soup"}))).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["name"], "Soup");
@@ -40,7 +42,7 @@ async fn post_recipes_returns_201_with_the_recipe() {
 
 #[tokio::test]
 async fn post_recipes_with_empty_name_returns_422_with_error() {
-    let app = router_for(Db::open_memory().await.unwrap());
+    let app = router_for(Db::open_memory().await.unwrap()).await;
     let (status, body) = send(&app, "POST", "/api/recipes", Some(json!({"name": "  "}))).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body["error"].as_str().unwrap().contains("name"), "{body}");
@@ -52,7 +54,7 @@ async fn get_recipes_returns_200_and_honours_include_archived() {
     db.create_recipe(mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
     let gone = db.create_recipe(mealier::RecipeInput { name: "Stew".into(), ..Default::default() }).await.unwrap();
     db.archive_recipe(gone.id).await.unwrap();
-    let app = router_for(db);
+    let app = router_for(db).await;
 
     let (status, body) = send(&app, "GET", "/api/recipes?include_archived=false", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -67,7 +69,7 @@ async fn get_recipes_returns_200_and_honours_include_archived() {
 async fn get_recipe_returns_200_with_the_recipe() {
     let db = Db::open_memory().await.unwrap();
     let r = db.create_recipe(mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
-    let app = router_for(db);
+    let app = router_for(db).await;
 
     let (status, body) = send(&app, "GET", &format!("/api/recipes/{}", r.id), None).await;
     assert_eq!(status, StatusCode::OK);
@@ -77,7 +79,7 @@ async fn get_recipe_returns_200_with_the_recipe() {
 
 #[tokio::test]
 async fn get_recipe_missing_returns_404_with_error() {
-    let app = router_for(Db::open_memory().await.unwrap());
+    let app = router_for(Db::open_memory().await.unwrap()).await;
     let (status, body) = send(&app, "GET", "/api/recipes/999", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body["error"].is_string(), "{body}");
@@ -87,7 +89,7 @@ async fn get_recipe_missing_returns_404_with_error() {
 async fn put_recipe_returns_200_with_the_updated_recipe() {
     let db = Db::open_memory().await.unwrap();
     let r = db.create_recipe(mealier::RecipeInput { name: "Pancakes".into(), ..Default::default() }).await.unwrap();
-    let app = router_for(db);
+    let app = router_for(db).await;
 
     let (status, body) =
         send(&app, "PUT", &format!("/api/recipes/{}", r.id), Some(json!({"name": "Waffles", "tags": ["breakfast"]})))
@@ -99,7 +101,7 @@ async fn put_recipe_returns_200_with_the_updated_recipe() {
 
 #[tokio::test]
 async fn put_recipe_missing_returns_404() {
-    let app = router_for(Db::open_memory().await.unwrap());
+    let app = router_for(Db::open_memory().await.unwrap()).await;
     let (status, body) = send(&app, "PUT", "/api/recipes/999", Some(json!({"name": "Ghost"}))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body["error"].is_string(), "{body}");
@@ -109,7 +111,7 @@ async fn put_recipe_missing_returns_404() {
 async fn put_recipe_with_empty_name_returns_422() {
     let db = Db::open_memory().await.unwrap();
     let r = db.create_recipe(mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
-    let app = router_for(db);
+    let app = router_for(db).await;
     let (status, body) = send(&app, "PUT", &format!("/api/recipes/{}", r.id), Some(json!({"name": ""}))).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body["error"].is_string(), "{body}");
@@ -119,7 +121,7 @@ async fn put_recipe_with_empty_name_returns_422() {
 async fn archive_returns_204_and_hides_the_recipe_from_the_default_list() {
     let db = Db::open_memory().await.unwrap();
     let r = db.create_recipe(mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
-    let app = router_for(db);
+    let app = router_for(db).await;
 
     let (status, _) = send(&app, "POST", &format!("/api/recipes/{}/archive", r.id), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -131,7 +133,7 @@ async fn archive_returns_204_and_hides_the_recipe_from_the_default_list() {
 async fn get_recipe_snapshots_returns_200_newest_first() {
     let db = Db::open_memory().await.unwrap();
     let r = db.create_recipe(mealier::RecipeInput { name: "Pancakes".into(), ..Default::default() }).await.unwrap();
-    let app = router_for(db);
+    let app = router_for(db).await;
     let (_, updated) = send(&app, "PUT", &format!("/api/recipes/{}", r.id), Some(json!({"name": "Waffles"}))).await;
 
     let (status, body) = send(&app, "GET", &format!("/api/recipes/{}/snapshots", r.id), None).await;
@@ -145,7 +147,7 @@ async fn get_recipe_snapshots_returns_200_newest_first() {
 async fn get_snapshot_returns_200_with_its_content() {
     let db = Db::open_memory().await.unwrap();
     let r = db.create_recipe(mealier::RecipeInput { name: "Pancakes".into(), ..Default::default() }).await.unwrap();
-    let app = router_for(db);
+    let app = router_for(db).await;
 
     let (status, body) = send(&app, "GET", &format!("/api/snapshots/{}", r.current_snapshot_id), None).await;
     assert_eq!(status, StatusCode::OK);
@@ -154,7 +156,7 @@ async fn get_snapshot_returns_200_with_its_content() {
 
 #[tokio::test]
 async fn get_snapshot_missing_returns_404() {
-    let app = router_for(Db::open_memory().await.unwrap());
+    let app = router_for(Db::open_memory().await.unwrap()).await;
     let (status, body) = send(&app, "GET", "/api/snapshots/999", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body["error"].is_string(), "{body}");
@@ -162,7 +164,7 @@ async fn get_snapshot_missing_returns_404() {
 
 #[tokio::test]
 async fn get_recipe_snapshots_missing_returns_404() {
-    let app = router_for(Db::open_memory().await.unwrap());
+    let app = router_for(Db::open_memory().await.unwrap()).await;
     let (status, _) = send(&app, "GET", "/api/recipes/999/snapshots", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
@@ -175,7 +177,7 @@ async fn get_recipes_q_filters_by_name_or_description() {
         .await
         .unwrap();
     db.create_recipe(mealier::RecipeInput { name: "Pie".into(), ..Default::default() }).await.unwrap();
-    let app = router_for(db);
+    let app = router_for(db).await;
 
     let (status, body) = send(&app, "GET", "/api/recipes?q=tomato", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -185,7 +187,7 @@ async fn get_recipes_q_filters_by_name_or_description() {
 
 #[tokio::test]
 async fn post_recipes_with_reversed_range_returns_422() {
-    let app = router_for(Db::open_memory().await.unwrap());
+    let app = router_for(Db::open_memory().await.unwrap()).await;
     let (status, body) = send(
         &app,
         "POST",
@@ -199,7 +201,7 @@ async fn post_recipes_with_reversed_range_returns_422() {
 
 #[tokio::test]
 async fn openapi_lists_every_recipe_route() {
-    let app = router_for(Db::open_memory().await.unwrap());
+    let app = router_for(Db::open_memory().await.unwrap()).await;
     let (status, body) = send(&app, "GET", "/api/openapi.json", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["openapi"].as_str().unwrap().starts_with("3."), "{body}");
@@ -249,9 +251,22 @@ async fn openapi_lists_every_recipe_route() {
         "PUT /api/webhooks/{id}",
         "DELETE /api/webhooks/{id}",
         "POST /api/webhooks/{id}/test",
+        "GET /api/me",
+        "GET /api/users",
+        "POST /api/users/{id}/disable",
+        "POST /api/users/{id}/enable",
     ];
     expected.sort();
     assert_eq!(found, expected);
+}
+
+#[tokio::test]
+async fn openapi_declares_the_bearer_scheme_and_requires_it_by_default() {
+    let app = router_for(Db::open_memory().await.unwrap()).await;
+    let (_, body) = send(&app, "GET", "/api/openapi.json", None).await;
+    let scheme = &body["components"]["securitySchemes"]["bearer"];
+    assert_eq!((scheme["type"].as_str(), scheme["scheme"].as_str()), (Some("http"), Some("bearer")), "{body}");
+    assert_eq!(body["security"], json!([{"bearer": []}]));
 }
 
 // --- batch log ---
@@ -267,7 +282,7 @@ async fn app_with_recipe() -> (Router, Db, i64) {
         })
         .await
         .unwrap();
-    (router_for(db.clone()), db, r.id)
+    (router_for(db.clone()).await, db, r.id)
 }
 
 #[tokio::test]
@@ -400,6 +415,7 @@ async fn upload(app: &Router, uri: &str, field: &str, bytes: &[u8]) -> (StatusCo
     let req = Request::builder()
         .method("POST")
         .uri(uri)
+        .header("authorization", common::BEARER)
         .header("content-type", "multipart/form-data; boundary=XB")
         .body(Body::from(body))
         .unwrap();
@@ -417,6 +433,7 @@ async fn post_batch_photos_returns_201_and_stores_the_file() {
     let rid = db.create_recipe(mealier::RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap().id;
     let b = db.start_batch(rid, 1.0).await.unwrap().batch.id;
     let dir = tempfile::tempdir().unwrap();
+    common::sign_in(&db).await;
     let app = api::router(api::AppState { db: db.clone(), images_dir: dir.path().to_path_buf() });
 
     let (status, body) = upload(&app, &format!("/api/batches/{b}/photos"), "photo", PNG).await;
@@ -465,7 +482,7 @@ async fn post_batch_photos_missing_batch_returns_404() {
 }
 
 async fn raw(app: &Router, method: &str, uri: &str, form: Option<&str>) -> (StatusCode, axum::http::HeaderMap, String) {
-    let mut req = Request::builder().method(method).uri(uri);
+    let mut req = Request::builder().method(method).uri(uri).header("authorization", common::BEARER);
     let body = match form {
         Some(f) => {
             req = req.header("content-type", "application/x-www-form-urlencoded");
@@ -481,7 +498,7 @@ async fn raw(app: &Router, method: &str, uri: &str, form: Option<&str>) -> (Stat
 
 #[tokio::test]
 async fn cook_page_shows_every_step_scaled_ingredients_and_requests_a_wake_lock() {
-    let app = router_for(Db::open_memory().await.unwrap());
+    let app = router_for(Db::open_memory().await.unwrap()).await;
     let (_, r) = send(&app, "POST", "/api/recipes", Some(json!({"name": "Soup", "steps": ["Chop the onion", "Simmer 20 min"], "ingredients": [{"original_text": "2 onions", "qty_min": 2.0, "qty_max": 2.0}]}))).await;
     let uri = format!("/recipes/{}/cook?scale=3", r["id"]);
     let (status, _, html) = raw(&app, "GET", &uri, None).await;
@@ -493,15 +510,19 @@ async fn cook_page_shows_every_step_scaled_ingredients_and_requests_a_wake_lock(
 }
 
 #[tokio::test]
-async fn cook_theme_post_rejects_unknown_themes_and_sets_the_cookie_for_known_ones() {
-    let app = router_for(Db::open_memory().await.unwrap());
+async fn cook_theme_post_rejects_unknown_themes_and_saves_known_ones_to_the_signed_in_user() {
+    let db = Db::open_memory().await.unwrap();
+    let app = router_for(db.clone()).await;
     let (status, _, _) = raw(&app, "POST", "/settings/cook-theme", Some("theme=neon&back=%2F")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
     let (status, headers, _) = raw(&app, "POST", "/settings/cook-theme", Some("theme=max-white&back=%2Frecipes%2F1%2Fcook")).await;
     assert!(status.is_redirection());
     assert_eq!(headers["location"], "/recipes/1/cook");
-    assert!(headers["set-cookie"].to_str().unwrap().starts_with("cook_theme=max-white;"));
+    // Step 8 moved the theme from a cookie to the user row.
+    assert!(headers.get("set-cookie").is_none());
+    let me = db.users().await.unwrap().into_iter().find(|u| u.username == "suite-admin").unwrap();
+    assert_eq!(me.cook_theme, "max-white");
 
     let (_, headers, _) = raw(&app, "POST", "/settings/cook-theme", Some("theme=normal&back=%2F%2Fevil.example")).await;
     assert_eq!(headers["location"], "/");
@@ -512,7 +533,7 @@ async fn post_parse_returns_a_parsed_entry_per_line() {
     let db = Db::open_memory().await.unwrap();
     let cup = db.add_unit("cup", mealier::Dimension::Volume, Some(236.5882365)).await.unwrap();
     let flour = db.add_food("flour").await.unwrap();
-    let app = router_for(db);
+    let app = router_for(db).await;
     let (status, body) = send(&app, "POST", "/api/parse", Some(json!({"lines": ["1 1/2 cups flour, sifted", "???"]}))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -536,7 +557,7 @@ async fn planner_app() -> (Router, i64) {
     let ingredients = vec![mealier::IngredientInput { qty_min: Some(100.0), qty_max: Some(100.0), unit_id: Some(g), food_id: Some(flour), ..Default::default() }];
     db.create_recipe(mealier::RecipeInput { name: "Bread".into(), ingredients, ..Default::default() }).await.unwrap();
     db.create_list("Weekly").await.unwrap();
-    (router_for(db), flour)
+    (router_for(db).await, flour)
 }
 
 fn entry_json(slot: &str) -> Value {

@@ -77,6 +77,7 @@ async fn validation_rejects_bad_url_kind_events_and_name() {
 }
 
 // ---- S23: delivery ----
+mod common;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -276,12 +277,13 @@ async fn ntfy_title_keeps_utf8_and_turns_control_characters_into_spaces() {
 }
 
 // ---- S24: HTTP ----
-fn app(db: Db) -> Router {
+async fn app(db: Db) -> Router {
+    common::sign_in(&db).await;
     api::router(api::AppState { db, images_dir: tempfile::tempdir().unwrap().keep() })
 }
 
 async fn call(app: &Router, method: &str, uri: &str, json: Option<Value>, form: Option<&str>) -> (StatusCode, HeaderMap, String) {
-    let mut req = Request::builder().method(method).uri(uri);
+    let mut req = Request::builder().method(method).uri(uri).header("authorization", common::BEARER);
     let body = if let Some(v) = json {
         req = req.header("content-type", "application/json");
         Body::from(v.to_string())
@@ -303,7 +305,7 @@ fn body(url: &str) -> Value {
 
 #[tokio::test]
 async fn api_post_creates_201_with_enabled_default_and_bad_input_is_422() {
-    let app = app(Db::open_memory().await.unwrap());
+    let app = app(Db::open_memory().await.unwrap()).await;
     let (s, _, b) = call(&app, "POST", "/api/webhooks", Some(body("http://127.0.0.1:9/x")), None).await;
     assert_eq!(s, StatusCode::CREATED, "{b}");
     let v: Value = serde_json::from_str(&b).unwrap();
@@ -315,7 +317,7 @@ async fn api_post_creates_201_with_enabled_default_and_bad_input_is_422() {
 
 #[tokio::test]
 async fn api_get_list_and_get_one_and_missing_is_404() {
-    let app = app(Db::open_memory().await.unwrap());
+    let app = app(Db::open_memory().await.unwrap()).await;
     let (_, _, b) = call(&app, "POST", "/api/webhooks", Some(body("http://127.0.0.1:9/x")), None).await;
     let id = serde_json::from_str::<Value>(&b).unwrap()["id"].as_i64().unwrap();
     let (s, _, b) = call(&app, "GET", "/api/webhooks", None, None).await;
@@ -330,7 +332,7 @@ async fn api_get_list_and_get_one_and_missing_is_404() {
 
 #[tokio::test]
 async fn api_put_replaces_200_missing_404_invalid_422() {
-    let app = app(Db::open_memory().await.unwrap());
+    let app = app(Db::open_memory().await.unwrap()).await;
     let (_, _, b) = call(&app, "POST", "/api/webhooks", Some(body("http://127.0.0.1:9/x")), None).await;
     let id = serde_json::from_str::<Value>(&b).unwrap()["id"].as_i64().unwrap();
     let mut upd = body("http://127.0.0.1:9/y");
@@ -347,7 +349,7 @@ async fn api_put_replaces_200_missing_404_invalid_422() {
 
 #[tokio::test]
 async fn api_delete_204_then_404() {
-    let app = app(Db::open_memory().await.unwrap());
+    let app = app(Db::open_memory().await.unwrap()).await;
     let (_, _, b) = call(&app, "POST", "/api/webhooks", Some(body("http://127.0.0.1:9/x")), None).await;
     let id = serde_json::from_str::<Value>(&b).unwrap()["id"].as_i64().unwrap();
     assert_eq!(call(&app, "DELETE", &format!("/api/webhooks/{id}"), None, None).await.0, StatusCode::NO_CONTENT);
@@ -357,7 +359,7 @@ async fn api_delete_204_then_404() {
 #[tokio::test]
 async fn api_test_posts_a_test_event_200_and_reports_receiver_status() {
     let (url, h) = receiver(503, Duration::ZERO).await;
-    let app = app(Db::open_memory().await.unwrap().with_notifier(notifier(None)));
+    let app = app(Db::open_memory().await.unwrap().with_notifier(notifier(None))).await;
     let (_, _, b) = call(&app, "POST", "/api/webhooks", Some(body(&format!("{url}/x"))), None).await;
     let id = serde_json::from_str::<Value>(&b).unwrap()["id"].as_i64().unwrap();
     let (s, _, b) = call(&app, "POST", &format!("/api/webhooks/{id}/test"), None, None).await;
@@ -368,7 +370,7 @@ async fn api_test_posts_a_test_event_200_and_reports_receiver_status() {
 
 #[tokio::test]
 async fn api_test_missing_is_404_and_unreachable_receiver_is_422() {
-    let app = app(Db::open_memory().await.unwrap().with_notifier(notifier(None)));
+    let app = app(Db::open_memory().await.unwrap().with_notifier(notifier(None))).await;
     assert_eq!(call(&app, "POST", "/api/webhooks/99/test", None, None).await.0, StatusCode::NOT_FOUND);
     let (_, _, b) = call(&app, "POST", "/api/webhooks", Some(body("http://127.0.0.1:1/x")), None).await;
     let id = serde_json::from_str::<Value>(&b).unwrap()["id"].as_i64().unwrap();
@@ -383,7 +385,7 @@ async fn page_lists_webhooks_and_escapes_names() {
     let mut i = input("<b>loud</b>");
     i.enabled = false;
     db.create_webhook(i).await.unwrap();
-    let (s, _, b) = call(&app(db), "GET", "/settings/webhooks", None, None).await;
+    let (s, _, b) = call(&app(db).await, "GET", "/settings/webhooks", None, None).await;
     assert_eq!(s, StatusCode::OK);
     assert!(b.contains("&#60;b&#62;loud") && !b.contains("<b>loud"), "{b}");
 }
@@ -391,7 +393,7 @@ async fn page_lists_webhooks_and_escapes_names() {
 #[tokio::test]
 async fn page_create_redirects_and_stores_with_checked_events() {
     let db = Db::open_memory().await.unwrap();
-    let app = app(db.clone());
+    let app = app(db.clone()).await;
     let f = "name=ntfy+me&kind=ntfy&url=http%3A%2F%2F127.0.0.1%3A9%2Ft&ntfy_tags=a%2Cb&ev_import_failed=on&ev_batch_logged=on";
     let (s, h, b) = call(&app, "POST", "/settings/webhooks", None, Some(f)).await;
     assert_eq!(s, StatusCode::SEE_OTHER, "{b}");
@@ -403,7 +405,7 @@ async fn page_create_redirects_and_stores_with_checked_events() {
 
 #[tokio::test]
 async fn page_create_without_events_is_422() {
-    let app = app(Db::open_memory().await.unwrap());
+    let app = app(Db::open_memory().await.unwrap()).await;
     let (s, ..) = call(&app, "POST", "/settings/webhooks", None, Some("name=x&kind=json&url=http%3A%2F%2Fa.test%2F")).await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
 }
@@ -412,7 +414,7 @@ async fn page_create_without_events_is_422() {
 async fn page_toggle_flips_enabled_and_delete_removes_missing_404() {
     let db = Db::open_memory().await.unwrap();
     let w = db.create_webhook(input("a")).await.unwrap();
-    let app = app(db.clone());
+    let app = app(db.clone()).await;
     let (s, h, _) = call(&app, "POST", &format!("/settings/webhooks/{}/toggle", w.id), None, Some("")).await;
     assert_eq!((s, h["location"].to_str().unwrap()), (StatusCode::SEE_OTHER, "/settings/webhooks"));
     assert!(!db.get_webhook(w.id).await.unwrap().enabled);
@@ -432,7 +434,7 @@ async fn page_send_test_redirects_with_the_outcome_and_the_page_shows_it() {
     let mut i = input("a");
     i.url = format!("{url}/x");
     let w = db.create_webhook(i).await.unwrap();
-    let app = app(db);
+    let app = app(db).await;
     let (s, hd, _) = call(&app, "POST", &format!("/settings/webhooks/{}/test", w.id), None, Some("")).await;
     assert_eq!(s, StatusCode::SEE_OTHER);
     let loc = hd["location"].to_str().unwrap().to_string();

@@ -21,7 +21,7 @@ pub struct Food {
     pub aliases: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct User {
     pub id: i64,
     pub username: String,
@@ -113,6 +113,23 @@ impl Image {
 /// The values `users.cook_theme` accepts (its CHECK says the same).
 pub const COOK_THEMES: [&str; 3] = ["normal", "high-contrast", "max-white"];
 
+/// Column list `user_row` reads, in order. Table-qualified callers alias the table `users`.
+pub(crate) const USER_COLS: &str = "users.id, users.username, users.email, users.full_name, users.role, users.oidc_issuer, users.oidc_subject, users.disabled, users.cook_theme";
+
+pub(crate) fn user_row(r: &sqlx::sqlite::SqliteRow) -> User {
+    User {
+        id: r.get(0),
+        username: r.get(1),
+        email: r.get(2),
+        full_name: r.get(3),
+        role: r.get(4),
+        oidc_issuer: r.get(5),
+        oidc_subject: r.get(6),
+        disabled: r.get(7),
+        cook_theme: r.get(8),
+    }
+}
+
 fn names(json: &str) -> Vec<String> {
     serde_json::from_str(json).unwrap_or_default()
 }
@@ -139,23 +156,8 @@ impl Db {
     }
 
     pub async fn users(&self) -> Result<Vec<User>> {
-        let rows = sqlx::query("SELECT id, username, email, full_name, role, oidc_issuer, oidc_subject, disabled, cook_theme FROM users ORDER BY id")
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows
-            .iter()
-            .map(|r| User {
-                id: r.get(0),
-                username: r.get(1),
-                email: r.get(2),
-                full_name: r.get(3),
-                role: r.get(4),
-                oidc_issuer: r.get(5),
-                oidc_subject: r.get(6),
-                disabled: r.get(7),
-                cook_theme: r.get(8),
-            })
-            .collect())
+        let rows = sqlx::query(&format!("SELECT {USER_COLS} FROM users ORDER BY id")).fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(user_row).collect())
     }
 
     pub async fn set_cook_theme(&self, user_id: i64, theme: &str) -> Result<()> {

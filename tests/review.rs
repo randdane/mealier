@@ -1,3 +1,4 @@
+mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
@@ -5,7 +6,7 @@ use mealier::{Db, Dimension, IngredientInput, RecipeInput, api};
 use tower::ServiceExt;
 
 async fn request(app: &axum::Router, method: &str, uri: &str, form: Option<&str>) -> (StatusCode, Option<String>, String) {
-    let mut req = Request::builder().method(method).uri(uri);
+    let mut req = Request::builder().method(method).uri(uri).header("authorization", common::BEARER);
     let body = match form {
         Some(f) => {
             req = req.header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
@@ -20,7 +21,8 @@ async fn request(app: &axum::Router, method: &str, uri: &str, form: Option<&str>
     (status, location, text)
 }
 
-fn app(db: Db) -> axum::Router {
+async fn app(db: Db) -> axum::Router {
+    common::sign_in(&db).await;
     api::router(api::AppState { db, images_dir: tempfile::tempdir().unwrap().keep() })
 }
 
@@ -41,7 +43,7 @@ async fn review_form_post_updates_the_recipe_and_creates_a_new_food_and_unit() {
         })
         .await
         .unwrap();
-    let app = app(db.clone());
+    let app = app(db.clone()).await;
 
     // Row 1 picks existing ones. Row 2 adds a new food and a new mass unit. Row 3 adds a new count unit.
     let form = format!(
@@ -77,7 +79,7 @@ async fn review_form_post_updates_the_recipe_and_creates_a_new_food_and_unit() {
 async fn new_recipe_form_parses_lines_and_redirects_to_the_review_screen() {
     let db = Db::open_memory().await.unwrap();
     db.add_food("flour").await.unwrap();
-    let app = app(db.clone());
+    let app = app(db.clone()).await;
 
     let (status, location, _) = request(&app, "POST", "/recipes", Some("name=Bread&description=&ingredients=2+flour%0D%0A%0D%0Anonsense+line%0D%0A")).await;
     assert_eq!(status, StatusCode::SEE_OTHER);

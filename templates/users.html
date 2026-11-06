@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Users - mealier{% endblock %}
+{% block content %}
+<h1>Users</h1>
+<ul>
+{% for u in users %}
+  <li>
+    <strong>{{ u.username }}</strong> {{ u.email }} <span class="badge">{{ u.role }}</span>{% if u.disabled %} <em>(disabled)</em>{% endif %}
+    {% if u.id != me %}
+    <form method="post" action="/settings/users/{{ u.id }}/{% if u.disabled %}enable{% else %}disable{% endif %}" class="inline"><button type="submit" class="quiet">{% if u.disabled %}Enable{% else %}Disable{% endif %}</button></form>
+    {% endif %}
+  </li>
+{% endfor %}
+</ul>
+<p><small>Disabling signs the user out everywhere and deletes their API tokens. Users are created by their first sign-in through Authentik; there is no sign-up.</small></p>
+{% endblock %}

@@ -1,4 +1,4 @@
-//! Webhooks: store (S22) and delivery (S23). Config is admin-only (step 8).
+//! Webhooks: store (S22) and delivery (S23). Config is admin-only (the `Admin` extractor on its routes).
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use utoipa::ToSchema;

@@ -40,7 +40,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/lists/add-batch", post(list_add_batch))
         .route("/lists/items/{id}/check", post(item_check))
         .route("/lists/items/{id}/delete", post(item_delete))
-        // step 8: admin only
+        // Admin only: each handler takes `Admin`, and the guard middleware refuses non-admins under /settings/webhooks.
         .route("/settings/webhooks", get(webhooks_page).post(webhook_create))
         .route("/settings/webhooks/{id}/delete", post(webhook_delete))
         .route("/settings/webhooks/{id}/toggle", post(webhook_toggle))
@@ -156,24 +156,12 @@ struct CookQuery {
     batch: Option<i64>,
 }
 
-fn cookie_theme(headers: &axum::http::HeaderMap) -> String {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
-        .filter_map(|c| c.trim().strip_prefix("cook_theme="))
-        .find(|t| crate::COOK_THEMES.contains(t))
-        .unwrap_or("normal")
-        .to_string()
-}
-
 async fn cook_page(
+    crate::CurrentUser { user, .. }: crate::CurrentUser,
     State(db): State<Db>,
     Path(id): Path<i64>,
     Query(q): Query<CookQuery>,
     uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
 ) -> Result<CookPage> {
     let r = db.get_recipe(id).await?.ok_or(Error::NotFound("recipe"))?;
     let scale = q.scale.unwrap_or(1.0);
@@ -203,8 +191,7 @@ async fn cook_page(
         name: r.content.name,
         ingredients,
         steps: r.content.steps,
-        // step 8: read from the signed-in user's cook_theme
-        theme: cookie_theme(&headers),
+        theme: user.cook_theme,
         back,
         here: uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default(),
         themes: crate::COOK_THEMES,
@@ -217,14 +204,11 @@ struct ThemeForm {
     back: String,
 }
 
-async fn set_theme(axum::Form(f): axum::Form<ThemeForm>) -> Result<impl IntoResponse> {
-    if !crate::COOK_THEMES.contains(&f.theme.as_str()) {
-        return Err(Error::Validation(format!("cook theme must be one of {}", crate::COOK_THEMES.join(", "))));
-    }
+async fn set_theme(crate::CurrentUser { user, .. }: crate::CurrentUser, State(db): State<Db>, axum::Form(f): axum::Form<ThemeForm>) -> Result<Redirect> {
+    db.set_cook_theme(user.id, &f.theme).await?;
     // Same-site paths only, so this cannot bounce a browser elsewhere.
     let back = if f.back.starts_with('/') && !f.back.starts_with("//") && !f.back.contains('\\') { f.back } else { "/".into() };
-    let cookie = format!("cook_theme={}; Path=/; Max-Age=31536000; SameSite=Lax", f.theme);
-    Ok(([(header::SET_COOKIE, cookie)], Redirect::to(&back)))
+    Ok(Redirect::to(&back))
 }
 
 #[derive(Deserialize)]
@@ -916,7 +900,7 @@ struct MsgQuery {
     msg: Option<String>,
 }
 
-async fn webhooks_page(State(db): State<Db>, Query(q): Query<MsgQuery>) -> Result<WebhooksPage> {
+async fn webhooks_page(_: crate::Admin, State(db): State<Db>, Query(q): Query<MsgQuery>) -> Result<WebhooksPage> {
     Ok(WebhooksPage { hooks: db.list_webhooks().await?, msg: q.msg.unwrap_or_default() })
 }
 
@@ -931,24 +915,24 @@ struct WebhookForm {
     ev_batch_logged: Option<String>,
 }
 
-async fn webhook_create(State(db): State<Db>, axum::Form(f): axum::Form<WebhookForm>) -> Result<Redirect> {
+async fn webhook_create(_: crate::Admin, State(db): State<Db>, axum::Form(f): axum::Form<WebhookForm>) -> Result<Redirect> {
     let events = [("import_failed", f.ev_import_failed), ("batch_logged", f.ev_batch_logged)].into_iter().filter(|(_, on)| on.is_some()).map(|(e, _)| e.to_string()).collect();
     db.create_webhook(crate::WebhookInput { name: f.name, kind: f.kind, url: f.url, events, ntfy_tags: f.ntfy_tags, enabled: true }).await?;
     Ok(Redirect::to("/settings/webhooks"))
 }
 
-async fn webhook_delete(State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
+async fn webhook_delete(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
     db.delete_webhook(id).await?;
     Ok(Redirect::to("/settings/webhooks"))
 }
 
-async fn webhook_toggle(State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
+async fn webhook_toggle(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
     let w = db.get_webhook(id).await?;
     db.update_webhook(id, crate::WebhookInput { name: w.name, kind: w.kind, url: w.url, events: w.events, ntfy_tags: w.ntfy_tags, enabled: !w.enabled }).await?;
     Ok(Redirect::to("/settings/webhooks"))
 }
 
-async fn webhook_test(State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
+async fn webhook_test(_: crate::Admin, State(db): State<Db>, Path(id): Path<i64>) -> Result<Redirect> {
     let msg = match db.send_test(id).await {
         Ok(s) => format!("Test sent; the receiver answered {s}."),
         Err(Error::NotFound(n)) => return Err(Error::NotFound(n)),

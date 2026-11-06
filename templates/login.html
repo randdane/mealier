@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Sign in - mealier{% endblock %}
+{% block nav %}<header><a href="/">mealier</a></header>{% endblock %}
+{% block content %}
+<h1>Sign in</h1>
+{% if !error.is_empty() %}<p role="alert">{{ error }}</p>{% endif %}
+{% if oidc %}<p><a class="button" href="/login/oidc">Sign in with Authentik</a></p>{% endif %}
+{% if local %}
+<form method="post" action="/login/local" class="stack">
+  <label>Username <input type="text" name="username" value="admin" autocomplete="username" required></label>
+  <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+  <button type="submit">Sign in as local admin</button>
+</form>
+{% endif %}
+{% if !oidc && !local %}<p>No sign-in method is configured.</p>{% endif %}
+{% endblock %}
