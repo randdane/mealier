@@ -13,7 +13,7 @@ use crate::images::Processed;
 use crate::filter::{self, By, Filter, SetField};
 use crate::tenancy::{free_slug, slugify};
 use crate::units::KNOWN_UNITS;
-use crate::recipes::{IngredientInput, Nutrition, RecipeInput, insert_recipe};
+use crate::recipes::{IngredientInput, LineDetail, Note, Nutrition, RecipeInput, Settings, StepDetail, Substitution, check_extras, insert_recipe};
 use crate::{Db, Dimension, Error, Result};
 
 /// `alembic_version` of Mealie v3.28.0, the only schema this importer reads.
@@ -39,6 +39,8 @@ pub struct ImportReport {
     pub shopping_list_items: usize,
     pub users: usize,
     pub images: usize,
+    /// Recipe attachments stored.
+    pub assets: usize,
     /// Records the importer left out, one line each.
     pub skipped: Vec<String>,
 }
@@ -163,6 +165,7 @@ pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Res
     let (b, mut archive) = read_backup(zip)?;
     let mut report = ImportReport::default();
     let images = prepare_images(&b, &mut archive, &mut report).await?;
+    let assets = prepare_assets(&b, &mut archive, &mut report)?;
     let mut tx = db.pool.begin().await?;
     let home = require_empty(&mut tx).await?;
     if let Some(g) = home {
@@ -173,7 +176,7 @@ pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Res
     import_tenants(&mut tx, &b, &mut report).await?;
     import_units_and_foods(&mut tx, &b, &mut report).await?;
     import_users(&mut tx, &b, &mut report).await?;
-    import_recipes(&mut tx, &b, &images, &mut report).await?;
+    import_recipes(&mut tx, &b, &images, &assets, &mut report).await?;
     import_history(&mut tx, &b, &mut report).await?;
     import_meal_plans(&mut tx, &b, &mut report).await?;
     import_cookbooks(&mut tx, &b, &mut report).await?;
@@ -188,6 +191,9 @@ pub async fn import_mealie_backup(db: &Db, zip: &Path, images_dir: &Path) -> Res
     // the GC step collects unreferenced ones.
     for photo in files {
         photo.write(images_dir)?;
+    }
+    for a in assets.values().flatten() {
+        a.write(&images_dir.join("assets"))?;
     }
     tx.commit().await?;
     Ok(report)
@@ -327,6 +333,43 @@ async fn import_units_and_foods(tx: &mut Tx<'_>, b: &Backup, report: &mut Import
         let lid = sqlx::query_scalar("SELECT id FROM foods WHERE group_id = ? AND name = ?").bind(group).bind(name).fetch_one(&mut **tx).await?;
         remember(tx, "food", uuid, lid).await?;
     }
+    import_food_features(tx, b, report).await
+}
+
+/// Mealie's `<owner>_extras` rows (`key_name`, `value`) as the JSON object kept in the owner's `extras` column, by owner id.
+/// The owner column's name is in `owner_keys`: the fixture has these tables empty, so the names are Mealie's model names, unconfirmed.
+fn extras_by_owner(b: &Backup, table: &str, owner_keys: &[&str]) -> HashMap<String, std::collections::BTreeMap<String, String>> {
+    let mut out: HashMap<String, std::collections::BTreeMap<String, String>> = HashMap::new();
+    for r in b.rows(table) {
+        let (Some(o), Some(k)) = (owner(r, owner_keys), s(r, "key_name")) else { continue };
+        let v = match r.get("value") {
+            Some(Value::String(v)) => v.clone(),
+            Some(Value::Null) | None => String::new(),
+            Some(other) => other.to_string(),
+        };
+        out.entry(o.to_string()).or_default().insert(k.to_string(), v);
+    }
+    out
+}
+
+/// Food extras and substitutions (`ingredient_food_extras`, `ingredient_foods_substitutions`).
+async fn import_food_features(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport) -> Result<()> {
+    for (uuid, extras) in extras_by_owner(b, "ingredient_food_extras", &["ingredient_food_id", "food_id"]) {
+        let food = local(tx, "food", &uuid).await?;
+        sqlx::query("UPDATE foods SET extras = ? WHERE id = ?").bind(serde_json::to_string(&check_extras(extras)?)?).bind(food).execute(&mut **tx).await?;
+    }
+    for r in b.rows("ingredient_foods_substitutions") {
+        let (food, sub) = (local(tx, "food", id(r, "food_id")?).await?, local(tx, "food", id(r, "substitute_food_id")?).await?);
+        let groups: Vec<i64> = sqlx::query_scalar("SELECT group_id FROM foods WHERE id IN (?, ?)").bind(food).bind(sub).fetch_all(&mut **tx).await?;
+        if groups.len() == 2 && groups[0] != groups[1] {
+            return Err(Error::Validation("backup food substitution joins foods of two groups".into()));
+        }
+        if food == sub {
+            report.skipped.push("a food substitution names the food itself; it was not imported".into());
+            continue;
+        }
+        sqlx::query("INSERT OR IGNORE INTO food_substitutions (food_id, substitute_food_id, note) VALUES (?, ?, ?)").bind(food).bind(sub).bind(s(r, "note").unwrap_or("").trim()).execute(&mut **tx).await?;
+    }
     Ok(())
 }
 
@@ -364,23 +407,115 @@ fn linked(b: &Backup, table: &str, key: &str, recipe: &str, names: &HashMap<Stri
         .collect()
 }
 
-async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, images: &HashMap<String, Processed>, report: &mut ImportReport) -> Result<()> {
+/// A recipe attachment read out of the zip, ready to store.
+struct PreparedAsset {
+    hash: String,
+    bytes: Vec<u8>,
+    name: String,
+    icon: String,
+    file_name: String,
+}
+
+impl PreparedAsset {
+    /// Content-addressed, so writing it twice is harmless. Whole or not at all, like images.
+    fn write(&self, dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let tmp = dir.join(format!("{}.tmp", self.hash));
+        std::fs::write(&tmp, &self.bytes)?;
+        std::fs::rename(tmp, dir.join(&self.hash))?;
+        Ok(())
+    }
+}
+
+/// Each recipe's attachments (`recipe_assets` rows, files under `data/recipes/<id>/assets/`), keyed by the
+/// recipe's Mealie id. Columns `name`, `icon`, `file_name` come from Mealie's `RecipeAsset` schema (the fixture's table is empty: unconfirmed).
+/// A file that is missing, empty or over the 20 MB limit is reported and left out.
+fn prepare_assets(b: &Backup, archive: &mut ZipArchive<File>, report: &mut ImportReport) -> Result<HashMap<String, Vec<PreparedAsset>>> {
+    use sha2::{Digest, Sha256};
+    let mut out: HashMap<String, Vec<PreparedAsset>> = HashMap::new();
+    for r in b.rows("recipe_assets") {
+        let (recipe, file_name) = (id(r, "recipe_id")?, s(r, "file_name").unwrap_or_default());
+        let label = format!("asset {file_name:?} ({:?}) of recipe {recipe}", s(r, "name").unwrap_or_default());
+        if recipe.len() != 32 || file_name.is_empty() {
+            report.skipped.push(format!("{label}: no usable file name; not imported"));
+            continue;
+        }
+        let mut bytes = Vec::new();
+        match archive.by_name(&format!("data/recipes/{}/assets/{file_name}", dashed(recipe))) {
+            Ok(mut f) => {
+                // Bounded read: a lying size in the header cannot make this allocate more than the limit.
+                if std::io::Read::take(&mut f, crate::MAX_ASSET_BYTES as u64 + 1).read_to_end(&mut bytes).is_err() {
+                    report.skipped.push(format!("{label}: the file cannot be read; not imported"));
+                    continue;
+                }
+            }
+            Err(_) => {
+                report.skipped.push(format!("{label}: the file is not in the backup; not imported"));
+                continue;
+            }
+        }
+        if bytes.is_empty() || bytes.len() > crate::MAX_ASSET_BYTES {
+            report.skipped.push(format!("{label}: the file is {}; not imported", if bytes.is_empty() { "empty" } else { "over 20 MB" }));
+            continue;
+        }
+        let hash = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        let file_name = crate::clean_file_name(file_name);
+        let name = s(r, "name").map(str::trim).filter(|n| !n.is_empty()).map_or_else(|| file_name.clone(), |n| n.chars().take(200).collect());
+        let list = out.entry(recipe.to_string()).or_default();
+        if !list.iter().any(|a| a.hash == hash) {
+            list.push(PreparedAsset { hash, bytes, name, icon: s(r, "icon").unwrap_or_default().chars().take(100).collect(), file_name });
+        }
+    }
+    report.assets = out.values().map(Vec::len).sum();
+    Ok(out)
+}
+
+/// Mealie's recipe settings as mealier's: `show_nutrition` is the opposite of `hide_nutrition`.
+fn settings_of(b: &Backup, recipe: &str) -> Settings {
+    let Some(r) = b.rows("recipe_settings").into_iter().find(|r| s(r, "recipe_id") == Some(recipe)) else { return Settings::default() };
+    Settings {
+        locked: flag(r, "locked"),
+        hide_nutrition: r.get("show_nutrition").and_then(Value::as_bool).is_some_and(|show| !show),
+        disable_comments: flag(r, "disable_comments"),
+        public: flag(r, "public"),
+        show_assets: flag(r, "show_assets"),
+        landscape_view: flag(r, "landscape_view"),
+        disable_amount: flag(r, "disable_amount"),
+    }
+}
+
+/// True when a link or substitution row's owner column (any of `keys`) names this ingredient row, by its integer `id` or its `reference_id`.
+fn names_ingredient(r: &MRow, keys: &[&str], ingredient: &MRow) -> bool {
+    keys.iter().filter_map(|k| r.get(*k)).any(|v| {
+        let text = match v {
+            Value::String(t) => t.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => return false,
+        };
+        ingredient.get("id").is_some_and(|i| match i {
+            Value::String(t) => *t == text,
+            Value::Number(n) => n.to_string() == text,
+            _ => false,
+        }) || s(ingredient, "reference_id") == Some(text.as_str())
+    })
+}
+
+async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, images: &HashMap<String, Processed>, assets: &HashMap<String, Vec<PreparedAsset>>, report: &mut ImportReport) -> Result<()> {
     let tags = vocabulary(tx, b, "tags", "tags", "tag").await?;
     let categories = vocabulary(tx, b, "categories", "categories", "category").await?;
     let tools = vocabulary(tx, b, "tools", "tools", "tool").await?;
     (report.tags, report.categories, report.tools) = (tags.len(), categories.len(), tools.len());
+    let recipe_extras = extras_by_owner(b, "api_extras", &["recipee_id", "recipe_id"]);
 
     let mut dropped_nutrition = false;
-    let mut dropped_titles = 0;
+    let mut dropped_summaries = 0;
     for r in b.rows("recipes") {
         let uuid = id(r, "id")?;
         let mut ingredients = Vec::new();
+        let mut details = Vec::new();
         for i in positioned(b, "recipes_ingredients", uuid) {
             let note = s(i, "note").unwrap_or("").to_string();
             let q = f(i, "quantity").filter(|q| *q > 0.0);
-            if s(i, "title").is_some_and(|t| !t.is_empty()) {
-                dropped_titles += 1;
-            }
             ingredients.push(IngredientInput {
                 qty_min: q,
                 qty_max: q,
@@ -389,6 +524,17 @@ async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, images: &HashMap<String, Pr
                 original_text: s(i, "original_text").map_or_else(|| note.clone(), str::to_string),
                 note,
             });
+            // Mealie's reference id is what its instructions link to; it becomes the line's id. Substitutions name
+            // the ingredient by its integer `id` or its `reference_id` (column names unconfirmed: the fixture's table is empty).
+            let mut substitutions = Vec::new();
+            for sub in b.rows("recipes_ingredients_substitutions").into_iter().filter(|x| names_ingredient(x, &["ingredient_id", "recipe_ingredient_id", "recipes_ingredients_id", "reference_id"], i)) {
+                let food = match s(sub, "substitute_food_id") {
+                    Some(f) => Some(sqlx::query_scalar::<_, String>("SELECT name FROM foods WHERE id = ?").bind(local(tx, "food", f).await?).fetch_one(&mut **tx).await?),
+                    None => None,
+                };
+                substitutions.push(Substitution { qty: None, unit: None, food, note: s(sub, "note").unwrap_or("").to_string() });
+            }
+            details.push(LineDetail { uid: s(i, "reference_id").filter(|u| !u.is_empty()).map(str::to_string), section: s(i, "title").unwrap_or("").to_string(), substitutions });
         }
         let nutrition = b.rows("recipe_nutrition").into_iter().find(|n| s(n, "recipe_id") == Some(uuid)).and_then(|n| {
             dropped_nutrition |= ["fiber", "sodium", "sugar", "cholesterol", "saturated_fat", "trans_fat", "unsaturated_fat"]
@@ -402,6 +548,27 @@ async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, images: &HashMap<String, Pr
             };
             (v != Nutrition::default()).then_some(v)
         });
+        // Steps: the title, and the ingredient lines each links to (`recipe_ingredient_ref_link`: instruction_id, reference_id).
+        let (mut steps, mut step_details) = (Vec::new(), Vec::new());
+        for step in positioned(b, "recipe_instructions", uuid) {
+            let Some(text) = s(step, "text") else { continue };
+            if s(step, "summary").is_some_and(|x| !x.is_empty()) {
+                dropped_summaries += 1;
+            }
+            let mut links: Vec<String> = Vec::new();
+            for l in b.rows("recipe_ingredient_ref_link").into_iter().filter(|l| s(l, "instruction_id") == s(step, "id")) {
+                let Some(reference) = s(l, "reference_id") else { continue };
+                if !details.iter().any(|d: &LineDetail| d.uid.as_deref() == Some(reference)) {
+                    report.skipped.push(format!("a step of recipe {uuid} links to the ingredient line {reference}, which the recipe does not have; the link was dropped"));
+                } else if !links.iter().any(|x| x == reference) {
+                    links.push(reference.to_string());
+                }
+            }
+            steps.push(text.to_string());
+            step_details.push(StepDetail { title: s(step, "title").unwrap_or("").to_string(), ingredient_uids: links });
+        }
+        let notes = b.rows("notes").into_iter().filter(|n| s(n, "recipe_id") == Some(uuid)).map(|n| Note { title: s(n, "title").unwrap_or("").to_string(), text: s(n, "text").unwrap_or("").to_string() }).collect();
+        let own_assets = assets.get(uuid).map(Vec::as_slice).unwrap_or_default();
         let input = RecipeInput {
             name: id(r, "name")?.to_string(),
             description: s(r, "description").unwrap_or("").to_string(),
@@ -412,18 +579,31 @@ async fn import_recipes(tx: &mut Tx<'_>, b: &Backup, images: &HashMap<String, Pr
             cookbooks: vec![],
             tools: linked(b, "recipes_to_tools", "tool_id", uuid, &tools),
             ingredients,
-            steps: positioned(b, "recipe_instructions", uuid).into_iter().filter_map(|i| s(i, "text").map(str::to_string)).collect(),
+            ingredient_details: details,
+            steps,
+            step_details,
+            notes: Some(notes),
+            extras: Some(recipe_extras.get(uuid).cloned().unwrap_or_default()),
+            settings: Some(settings_of(b, uuid)),
         };
         let group = local(tx, "group", id(r, "group_id")?).await?;
-        let recipe = insert_recipe(tx, group, input, images.get(uuid).map(|p| p.hash.clone()).into_iter().collect()).await?;
+        let recipe = insert_recipe(tx, group, input, images.get(uuid).map(|p| p.hash.clone()).into_iter().collect(), own_assets.iter().map(|a| a.hash.clone()).collect()).await?;
+        for a in own_assets {
+            sqlx::query("INSERT OR IGNORE INTO assets (hash, size) VALUES (?, ?)").bind(&a.hash).bind(a.bytes.len() as i64).execute(&mut **tx).await?;
+            sqlx::query("INSERT INTO recipe_assets (recipe_id, hash, name, icon, file_name) VALUES (?, ?, ?, ?, ?)").bind(recipe.id).bind(&a.hash).bind(&a.name).bind(&a.icon).bind(&a.file_name).execute(&mut **tx).await?;
+        }
         remember(tx, "recipe", uuid, recipe.id).await?;
         report.recipes += 1;
     }
     if dropped_nutrition {
         report.skipped.push("nutrition other than calories, protein, fat and carbohydrate is not imported".into());
     }
-    if dropped_titles > 0 {
-        report.skipped.push(format!("{dropped_titles} ingredient section titles are not imported"));
+    if dropped_summaries > 0 {
+        report.skipped.push(format!("{dropped_summaries} step summaries are not imported (mealier steps have a title and text)"));
+    }
+    let note_links = b.rows("recipe_note_ref_link").len();
+    if note_links > 0 {
+        report.skipped.push(format!("{note_links} note references on steps are not imported; the notes themselves are"));
     }
     Ok(())
 }
@@ -706,7 +886,7 @@ async fn import_shopping(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport)
                 same_group(tx, table, x, group, &format!("shopping list item's {what}")).await?;
             }
         }
-        sqlx::query("INSERT INTO shopping_list_items (list_id, qty, unit_id, food_id, note, checked, recipe_id, label_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        let item_id = sqlx::query("INSERT INTO shopping_list_items (list_id, qty, unit_id, food_id, note, checked, recipe_id, label_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(local(tx, "shopping_list", list_uuid).await?)
             .bind(q)
             .bind(unit)
@@ -716,7 +896,9 @@ async fn import_shopping(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport)
             .bind(recipe)
             .bind(label)
             .execute(&mut **tx)
-            .await?;
+            .await?
+            .last_insert_rowid();
+        remember(tx, "shopping_list_item", id(i, "id")?, item_id).await?;
         report.shopping_list_items += 1;
     }
     for p in b.rows("shopping_lists_multi_purpose_labels") {
@@ -725,6 +907,15 @@ async fn import_shopping(tx: &mut Tx<'_>, b: &Backup, report: &mut ImportReport)
         let group = *list_group.get(id(p, "shopping_list_id")?).ok_or_else(|| Error::Validation("backup refers to a shopping_list it does not contain".into()))?;
         same_group(tx, "labels", label, group, "shopping list's label order").await?;
         sqlx::query("INSERT OR REPLACE INTO shopping_list_labels (list_id, label_id, position) VALUES (?, ?, ?)").bind(list).bind(label).bind(p.get("position").and_then(Value::as_i64).unwrap_or(0)).execute(&mut **tx).await?;
+    }
+    // Extras (`key_name`, `value`; owner columns named after the model: unconfirmed, the fixture's tables are empty).
+    for (uuid, extras) in extras_by_owner(b, "shopping_list_extras", &["shopping_list_id"]) {
+        let list = local(tx, "shopping_list", &uuid).await?;
+        sqlx::query("UPDATE shopping_lists SET extras = ? WHERE id = ?").bind(serde_json::to_string(&check_extras(extras)?)?).bind(list).execute(&mut **tx).await?;
+    }
+    for (uuid, extras) in extras_by_owner(b, "shopping_list_item_extras", &["shopping_list_item_id"]) {
+        let item = local(tx, "shopping_list_item", &uuid).await?;
+        sqlx::query("UPDATE shopping_list_items SET extras = ? WHERE id = ?").bind(serde_json::to_string(&check_extras(extras)?)?).bind(item).execute(&mut **tx).await?;
     }
     if !b.rows("shopping_list_recipe_reference").is_empty() {
         report.skipped.push("shopping lists' own recipe references are not imported; items keep theirs".into());

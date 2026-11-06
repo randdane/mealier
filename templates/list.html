@@ -2,6 +2,7 @@
 {% block title %}{{ name }} - mealier{% endblock %}
 {% block content %}
 <h1>{{ name }}</h1>
+{% if !extras.is_empty() %}<table><tbody>{% for e in extras %}<tr><th>{{ e.0 }}</th><td>{{ e.1 }}</td></tr>{% endfor %}</tbody></table>{% endif %}
 {% for s in sections %}
 <section class="section" style="border-left: 4px solid {{ s.color }}; padding-left: .75rem">
   <h2>{{ s.title }}
@@ -17,7 +18,7 @@
     <li>
       <form method="post" action="/lists/items/{{ i.id }}/check" class="inline">
         <label><input type="checkbox" name="checked" value="1"{% if i.checked %} checked{% endif %}
-               hx-post="/lists/items/{{ i.id }}/check" hx-trigger="change" hx-swap="none"><span>{{ i.text }}</span></label>
+               hx-post="/lists/items/{{ i.id }}/check" hx-trigger="change" hx-swap="none"><span>{{ i.text }}</span></label>{% for e in i.extras %} <small class="uses">{{ e.0 }}: {{ e.1 }}</small>{% endfor %}
         <noscript><button type="submit">Save</button></noscript>
       </form>
       <form method="post" action="/lists/items/{{ i.id }}/delete" class="inline"><button type="submit" class="quiet" aria-label="Delete {{ i.text }}">Delete</button></form>

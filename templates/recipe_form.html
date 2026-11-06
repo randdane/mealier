@@ -3,10 +3,14 @@
 {% block content %}
 <h1>{{ heading }}</h1>
 <form method="post" action="{{ action }}" enctype="multipart/form-data">
+  <input type="hidden" name="features" value="1">
   <label class="block">Name <input type="text" name="name" value="{{ name }}" required></label>
   <label class="block">Description <textarea name="description" rows="3">{{ description }}</textarea></label>
-  <label class="block">Ingredients (one per line) <textarea name="ingredients" rows="10">{{ ingredients }}</textarea></label>
-  <label class="block">Steps (one per line) <textarea name="steps" rows="8">{{ steps }}</textarea></label>
+  <label class="block">Ingredients (one per line; a line starting with ## titles a section)
+    <textarea name="ingredients" rows="10">{{ ingredients }}</textarea></label>
+  <label class="block">Steps (one per line; a line starting with ## titles the step after it)
+    <textarea name="steps" rows="8">{{ steps }}</textarea></label>
+  {% if id != 0 %}<p><a href="/recipes/{{ id }}/link-ingredients">Link ingredients to steps</a> (save first if you changed lines)</p>{% endif %}
   <label class="block">Tags (comma separated) <input type="text" name="tags" value="{{ tags }}"></label>
   <label class="block">Categories (comma separated) <input type="text" name="categories" value="{{ categories }}"></label>
   <label class="block">Tools (comma separated) <input type="text" name="tools" value="{{ tools }}"></label>
@@ -16,6 +20,57 @@
     <input type="file" name="image" accept="image/png,image/jpeg,image/webp">
   </label>
   {{ nutrition|safe }}
+
+  <fieldset>
+    <legend>Notes</legend>
+    {% for n in notes %}
+    <div class="row"><input type="text" name="note_title" value="{{ n.title }}" placeholder="Title"><textarea name="note_text" rows="2" placeholder="Note">{{ n.text }}</textarea></div>
+    {% endfor %}
+  </fieldset>
+
+  <fieldset>
+    <legend>Extras (key and value)</legend>
+    {% for e in extras %}
+    <div class="row"><input type="text" name="extra_key" value="{{ e.key }}" placeholder="Key"><input type="text" name="extra_value" value="{{ e.value }}" placeholder="Value"></div>
+    {% endfor %}
+  </fieldset>
+
+  <fieldset>
+    <legend>Substitutions (the number of the ingredient line, counting from 1, and what can replace it)</legend>
+    {% for r in subs %}
+    <div class="row">
+      <input type="number" name="sub_line" value="{{ r.line }}" min="1" placeholder="Line" aria-label="Ingredient line number">
+      <input type="number" name="sub_qty" value="{{ r.qty }}" step="any" min="0" inputmode="decimal" placeholder="Amount" aria-label="Amount">
+      <input type="text" name="sub_unit" value="{{ r.unit }}" placeholder="Unit" aria-label="Unit">
+      <input type="text" name="sub_food" value="{{ r.food }}" placeholder="Food" aria-label="Food">
+      <input type="text" name="sub_note" value="{{ r.note }}" placeholder="Note" aria-label="Note">
+    </div>
+    {% endfor %}
+  </fieldset>
+  <p class="remove">Rows left blank are dropped. Save to get two more of each.</p>
+
+  <fieldset>
+    <legend>Settings</legend>
+    {% for f in flags %}
+    <label class="block"><span><input type="checkbox" name="{{ f.0 }}"{% if f.2 %} checked{% endif %}> {{ f.1 }}</span></label>
+    {% endfor %}
+  </fieldset>
   <div class="buttons"><button type="submit">Save and review ingredients</button></div>
 </form>
+
+{% if id != 0 %}
+<h2>Attachments</h2>
+{% if assets.is_empty() %}<p>None.</p>{% endif %}
+<ul>
+{% for a in assets %}
+  <li><a href="/api/assets/{{ a.hash }}?recipe={{ id }}">{{ a.name }}</a> ({{ a.file_name }})
+    <form method="post" action="/recipes/{{ id }}/assets/{{ a.hash }}/delete" class="inline"><button type="submit" class="quiet">Remove</button></form></li>
+{% endfor %}
+</ul>
+<form method="post" action="/recipes/{{ id }}/assets" enctype="multipart/form-data" class="stack">
+  <label>File (any type, up to 20 MB) <input type="file" name="file" required></label>
+  <label>Name <input type="text" name="name" placeholder="Shown in the list"></label>
+  <button type="submit">Attach</button>
+</form>
+{% endif %}
 {% endblock %}

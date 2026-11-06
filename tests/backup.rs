@@ -361,3 +361,60 @@ async fn the_offline_restore_refuses_while_a_server_holds_the_data_directory() {
     // and the lock is free again afterwards
     lock_data_dir(b.path()).unwrap();
 }
+
+// ---------- assets ----------
+
+#[tokio::test]
+async fn an_export_carries_assets_and_a_restore_checks_and_brings_them_back() {
+    let a = Site::new();
+    let db = a.db().await;
+    let sc = common::scope(&db).await;
+    let soup = db.create_recipe(&sc, RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
+    let bytes = b"%PDF-1.4 not an image".to_vec();
+    let asset = db.add_recipe_asset(&sc, soup.id, &a.images().join("assets"), "menu.pdf", "Menu", "", &bytes).await.unwrap();
+    let zip = exported(&a, &db).await;
+    let names: Vec<String> = entries(&zip).into_iter().map(|(n, _)| n).collect();
+    assert!(names.contains(&format!("assets/{}", asset.hash)), "{names:?}");
+
+    let b = Site::new();
+    restore(&zip, b.path()).await.unwrap();
+    assert_eq!(std::fs::read(b.images().join("assets").join(&asset.hash)).unwrap(), bytes);
+    let copy = b.db().await;
+    assert_eq!(count(&copy, "recipe_assets").await, 1);
+    assert_eq!(snapshots(&copy).await, snapshots(&db).await);
+
+    // a damaged asset, and a missing one, are refused before anything is touched
+    let good = entries(&zip);
+    type Entries = Vec<(String, Vec<u8>)>;
+    let with = |edit: &dyn Fn(&mut Entries)| {
+        let mut e = good.clone();
+        edit(&mut e);
+        let path = a.outside().join("edited.zip");
+        write_zip(&path, &e);
+        path
+    };
+    let damaged = with(&|e| e.iter_mut().filter(|(n, _)| n.starts_with("assets/")).for_each(|(_, b)| b.push(b'!')));
+    let c = Site::new();
+    let before = fingerprint(c.path());
+    assert!(invalid(restore(&damaged, c.path()).await).contains("does not match its sha256"));
+    let missing = with(&|e| e.retain(|(n, _)| !n.starts_with("assets/")));
+    assert!(invalid(restore(&missing, c.path()).await).contains("lacks the asset"));
+    assert_eq!(fingerprint(c.path()), before);
+    // names that are not a hash are not written
+    let odd = with(&|e| e.push(("assets/../evil".into(), b"x".to_vec())));
+    assert!(invalid(restore(&odd, c.path()).await).contains("never writes"));
+}
+
+#[tokio::test]
+async fn an_export_names_the_asset_file_that_is_missing() {
+    let a = Site::new();
+    let db = a.db().await;
+    let sc = common::scope(&db).await;
+    let soup = db.create_recipe(&sc, RecipeInput { name: "Soup".into(), ..Default::default() }).await.unwrap();
+    let asset = db.add_recipe_asset(&sc, soup.id, &a.images().join("assets"), "menu.pdf", "Menu", "", b"hello").await.unwrap();
+    std::fs::remove_file(a.images().join("assets").join(&asset.hash)).unwrap();
+    let out = a.outside().join("export.zip");
+    let msg = invalid(export(db.pool(), a.path(), &out).await);
+    assert!(msg.contains(&asset.hash), "{msg}");
+    assert!(!out.exists());
+}

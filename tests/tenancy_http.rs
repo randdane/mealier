@@ -18,6 +18,8 @@ enum Req {
     Json(Value),
     Form(String),
     Photo,
+    /// A multipart upload in the field `file`, as an asset.
+    File,
 }
 
 async fn send(app: &Router, method: &str, uri: &str, bearer: Option<&str>, body: Req) -> (StatusCode, HeaderMap, String) {
@@ -41,6 +43,10 @@ async fn send(app: &Router, method: &str, uri: &str, bearer: Option<&str>, body:
             b.extend_from_slice(&common::png(4, 4, 1));
             b.extend_from_slice(b"\r\n--XX--\r\n");
             Body::from(b)
+        }
+        Req::File => {
+            req = req.header("content-type", "multipart/form-data; boundary=XX");
+            Body::from(b"--XX\r\nContent-Disposition: form-data; name=\"file\"; filename=\"menu.txt\"\r\nContent-Type: text/plain\r\n\r\nupload\r\n--XX--\r\n".to_vec())
         }
     };
     let resp = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
@@ -92,6 +98,12 @@ struct Ids {
     label: i64,
     cookbook: i64,
     rule: i64,
+    /// A second food of group One, a substitute for `food`.
+    food2: i64,
+    /// The entry making `food2` a substitute of `food`.
+    sub: i64,
+    /// The sha256 of an asset attached to `recipe`.
+    asset: String,
 }
 
 async fn world() -> World {
@@ -114,8 +126,11 @@ async fn world() -> World {
     let cookbook = db.add_cookbook(&t.a, CookbookInput { name: "Secret-book".into(), query_filter: String::new(), ..Default::default() }).await.unwrap();
     let rule = db.add_rule(&t.a, RuleInput { day: "monday".into(), household_ids: vec![t.a.household_id], ..Default::default() }).await.unwrap();
     let images = tempfile::tempdir().unwrap().keep();
+    let food2 = db.add_food(&t.a, "butter").await.unwrap();
+    let sub = db.add_food_substitution(&t.a, food, mealier::SubstitutionInput { food_id: food2, note: "1:1".into() }).await.unwrap()[0].id;
+    let asset = db.add_recipe_asset(&t.a, recipe.id, &images.join("assets"), "seed.txt", "Seed", "", b"seed").await.unwrap().hash;
     let app = api::router(api::AppState { db: db.clone(), images_dir: images.clone() });
-    let ids = Ids { recipe: recipe.id, snapshot: recipe.current_snapshot_id, batch: b.batch.id, line: b.lines[0].id, entry: entry.id, list: list.id, item: item.id, unit, food, label: label.id, cookbook: cookbook.id, rule: rule.id };
+    let ids = Ids { recipe: recipe.id, snapshot: recipe.current_snapshot_id, batch: b.batch.id, line: b.lines[0].id, entry: entry.id, list: list.id, item: item.id, unit, food, label: label.id, cookbook: cookbook.id, rule: rule.id, food2, sub, asset };
     World { app, db, t, images, alice, bob, carol, ids }
 }
 
@@ -129,6 +144,9 @@ impl World {
             .replace("{entry}", &i.entry.to_string())
             .replace("{list}", &i.list.to_string())
             .replace("{item}", &i.item.to_string())
+            .replace("{food2}", &i.food2.to_string())
+            .replace("{sub}", &i.sub.to_string())
+            .replace("{asset}", &i.asset)
             .replace("{food}", &i.food.to_string())
             .replace("{label}", &i.label.to_string())
             .replace("{cookbook}", &i.cookbook.to_string())
@@ -154,6 +172,13 @@ impl World {
             "SELECT json_group_array(json_array(id, group_id, name, description, slug, position, public, query_filter, filter_json)) FROM cookbooks",
             "SELECT json_group_array(json_array(id, group_id, day, slot, query_filter, filter_json)) FROM meal_plan_rules",
             "SELECT json_group_array(json_array(rule_id, household_id)) FROM meal_plan_rule_households",
+            "SELECT json_group_array(json_array(id, recipe_id, hash, name, icon, file_name)) FROM recipe_assets",
+            "SELECT json_group_array(json_array(hash, size)) FROM assets",
+            "SELECT json_group_array(json_array(food_id, substitute_food_id, note)) FROM food_substitutions",
+            "SELECT json_group_array(json_array(id, recipe_id, user_id, text)) FROM recipe_comments",
+            "SELECT json_group_array(json_array(id, extras)) FROM foods",
+            "SELECT json_group_array(json_array(id, extras)) FROM shopping_lists",
+            "SELECT json_group_array(json_array(id, extras)) FROM shopping_list_items",
         ] {
             let s: String = sqlx::query_scalar(sql).fetch_one(self.db.pool()).await.unwrap();
             out.push_str(&s);
@@ -221,6 +246,19 @@ fn api_routes() -> Vec<Route> {
         r("GET", "/api/meal-plan-rules/{rule}", Group, none, 200),
         r("PUT", "/api/meal-plan-rules/{rule}", Group, |_| Req::Json(json!({"slot": "lunch"})), 200),
         r("DELETE", "/api/meal-plan-rules/{rule}", Spent, none, 204),
+        r("GET", "/api/recipes/{recipe}/assets", Group, none, 200),
+        r("POST", "/api/recipes/{recipe}/assets", Group, |_| Req::File, 201),
+        r("GET", "/api/assets/{asset}?recipe={recipe}", Group, none, 200),
+        r("DELETE", "/api/assets/{asset}?recipe={recipe}", Spent, none, 204),
+        r("GET", "/api/recipes/{recipe}/comments", Group, none, 200),
+        r("POST", "/api/recipes/{recipe}/comments", Group, |_| Req::Json(json!({"text": "nice"})), 201),
+        r("GET", "/api/foods/{food}", Group, none, 200),
+        r("PUT", "/api/foods/{food}/extras", Group, |_| Req::Json(json!({"aisle": "3"})), 204),
+        r("GET", "/api/foods/{food}/substitutions", Group, none, 200),
+        r("POST", "/api/foods/{food}/substitutions", Group, |i| Req::Json(json!({"food_id": i.food2, "note": "again"})), 201),
+        r("PUT", "/api/food-substitutions/{sub}", Group, |_| Req::Json(json!({"note": "3:4"})), 200),
+        r("DELETE", "/api/food-substitutions/{sub}", Spent, none, 204),
+        r("PUT", "/api/shopping-lists/{list}/extras", Household, |_| Req::Json(json!({"store": "co-op"})), 204),
     ]
 }
 
@@ -235,6 +273,10 @@ fn html_routes() -> Vec<Route> {
         r("POST", "/recipes/{recipe}/nutrition/estimate", Group, none, 422),
         r("GET", "/recipes/{recipe}/ingredients/review", Group, none, 200),
         r("POST", "/recipes/{recipe}/ingredients/review", Group, |_| Req::Form(String::new()), 303),
+        r("GET", "/recipes/{recipe}/link-ingredients", Group, none, 200),
+        r("POST", "/recipes/{recipe}/link-ingredients", Group, |_| Req::Form(String::new()), 303),
+        r("POST", "/recipes/{recipe}/assets", Group, |_| Req::File, 303),
+        r("POST", "/recipes/{recipe}/assets/{asset}/delete", Spent, |_| Req::Form(String::new()), 303),
         r("GET", "/recipes/{recipe}/cook", Group, none, 200),
         r("GET", "/recipes/{recipe}/cook?batch={batch}", Household, none, 200),
         r("POST", "/recipes/{recipe}/batches", Group, |_| Req::Form("scale=1".into()), 303),

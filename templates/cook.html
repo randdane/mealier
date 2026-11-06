@@ -14,7 +14,7 @@
 
 <h2>Steps</h2>
 <ol class="steps" data-key="mealier:cook:{{ key }}">
-{% for s in steps %}<li><label><input type="checkbox"><span>{{ s }}</span></label></li>{% endfor %}
+{% for s in steps %}<li><label><input type="checkbox">{% if !s.title.is_empty() %}<strong>{{ s.title }}</strong> {% endif %}<span>{{ s.text }}</span></label>{% if !s.uses.is_empty() %}<small class="uses">Uses: {{ s.uses.join(", ") }}</small>{% endif %}</li>{% endfor %}
 </ol>
 
 <form method="post" action="/settings/cook-theme" class="theme">

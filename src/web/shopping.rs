@@ -47,6 +47,7 @@ struct ItemRow {
     id: i64,
     checked: bool,
     text: String,
+    extras: Vec<(String, String)>,
 }
 
 struct SectionRow {
@@ -64,6 +65,7 @@ struct ListPage {
     name: String,
     sections: Vec<SectionRow>,
     units: Vec<crate::Unit>,
+    extras: Vec<(String, String)>,
 }
 
 async fn list_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<ListPage> {
@@ -73,7 +75,7 @@ async fn list_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Resu
         let unit = i.unit_id.and_then(|u| units.iter().find(|x| x.id == u)).map(|u| u.name.as_str());
         let food = i.food_id.and_then(|f| foods.iter().find(|x| x.id == f)).map(|f| f.name.as_str());
         let text = [amount(i.qty, i.qty_max, unit), food.unwrap_or_default().to_string(), i.note.clone()];
-        ItemRow { id: i.id, checked: i.checked, text: text.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" ") }
+        ItemRow { id: i.id, checked: i.checked, text: text.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "), extras: i.extras.clone().into_iter().collect() }
     };
     let sections = list
         .sections
@@ -85,7 +87,7 @@ async fn list_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Resu
             items: s.items.iter().map(row).collect(),
         })
         .collect();
-    Ok(ListPage { id, name: list.name, sections, units })
+    Ok(ListPage { id, name: list.name, sections, units, extras: list.extras.into_iter().collect() })
 }
 
 #[derive(Deserialize)]

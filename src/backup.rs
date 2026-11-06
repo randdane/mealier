@@ -33,6 +33,8 @@ use crate::{Admin, Error, Result};
 
 pub const DB_FILE: &str = "mealier.db";
 const IMAGES: &str = "images";
+/// Assets are stored in `images/assets/<sha256>` and travel in the zip as `assets/<sha256>`.
+const ASSETS: &str = "assets";
 const EXPORT_STAGING: &str = "export-staging";
 const RESTORE_STAGING: &str = "restore-staging";
 const LOCK_FILE: &str = "mealier.lock";
@@ -104,12 +106,13 @@ pub async fn export(pool: &SqlitePool, data_dir: &Path, out: &Path) -> Result<()
 
     let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&copy).read_only(true)).await?;
     let images: Vec<(String, String)> = sqlx::query_as("SELECT hash, mime FROM images ORDER BY hash").fetch_all(&mut conn).await?;
+    let assets: Vec<String> = sqlx::query_scalar("SELECT hash FROM assets ORDER BY hash").fetch_all(&mut conn).await?;
     conn.close().await?;
 
     let (images_dir, out, partial) = (data_dir.join(IMAGES), out.to_path_buf(), out.with_extension("partial"));
     let _partial = Cleanup(partial.clone());
     tokio::task::spawn_blocking(move || {
-        write_zip(&copy, &images, &images_dir, &partial)?;
+        write_zip(&copy, &images, &assets, &images_dir, &partial)?;
         fs::rename(&partial, &out)?;
         Ok::<_, Error>(())
     })
@@ -117,18 +120,16 @@ pub async fn export(pool: &SqlitePool, data_dir: &Path, out: &Path) -> Result<()
     .map_err(|e| Error::Internal(e.to_string()))?
 }
 
-fn write_zip(db_copy: &Path, images: &[(String, String)], images_dir: &Path, out: &Path) -> Result<()> {
+fn write_zip(db_copy: &Path, images: &[(String, String)], assets: &[String], images_dir: &Path, out: &Path) -> Result<()> {
     let zerr = |e: zip::result::ZipError| Error::Internal(e.to_string());
     let mut zip = ZipWriter::new(File::create(out)?);
     zip.start_file(DB_FILE, SimpleFileOptions::default().compression_method(CompressionMethod::Deflated).large_file(true)).map_err(zerr)?;
     io::copy(&mut File::open(db_copy)?, &mut zip)?;
-    // Images are already compressed.
+    // Images are already compressed, and an asset is whatever it is: stored as it is.
     let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored).large_file(true);
-    for (hash, mime) in images {
-        let ext = crate::images::ext(mime).ok_or_else(|| bad(format!("image {hash} has a type ({mime}) that cannot be exported")))?;
-        let name = format!("{hash}.{ext}");
-        let mut file = File::open(images_dir.join(&name)).map_err(|e| bad(format!("image file {name} cannot be read ({}); the library has a hole", e.kind())))?;
-        zip.start_file(format!("{IMAGES}/{name}"), stored).map_err(zerr)?;
+    let mut add = |what: &str, entry: String, path: PathBuf, hash: &str| -> Result<()> {
+        let mut file = File::open(&path).map_err(|e| bad(format!("{what} file {} cannot be read ({}); the library has a hole", path.file_name().unwrap_or_default().to_string_lossy(), e.kind())))?;
+        zip.start_file(entry, stored).map_err(zerr)?;
         let (mut digest, mut buf) = (Sha256::new(), [0u8; 64 * 1024]);
         loop {
             let n = file.read(&mut buf)?;
@@ -138,9 +139,18 @@ fn write_zip(db_copy: &Path, images: &[(String, String)], images_dir: &Path, out
             digest.update(&buf[..n]);
             zip.write_all(&buf[..n])?;
         }
-        if hex(&digest.finalize()) != *hash {
-            return Err(bad(format!("image file {name} does not match its sha256; the library is damaged")));
+        if hex(&digest.finalize()) != hash {
+            return Err(bad(format!("{what} file {} does not match its sha256; the library is damaged", path.file_name().unwrap_or_default().to_string_lossy())));
         }
+        Ok(())
+    };
+    for (hash, mime) in images {
+        let ext = crate::images::ext(mime).ok_or_else(|| bad(format!("image {hash} has a type ({mime}) that cannot be exported")))?;
+        let name = format!("{hash}.{ext}");
+        add("image", format!("{IMAGES}/{name}"), images_dir.join(&name), hash)?;
+    }
+    for hash in assets {
+        add("asset", format!("{ASSETS}/{hash}"), images_dir.join(ASSETS).join(hash), hash)?;
     }
     zip.finish().map_err(zerr)?;
     Ok(())
@@ -186,7 +196,7 @@ pub async fn restore(zip: &Path, data_dir: &Path) -> Result<Restored> {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
         _ => {}
     }
-    fs::create_dir_all(staging.join(IMAGES))?;
+    fs::create_dir_all(staging.join(IMAGES).join(ASSETS))?;
     let r = async {
         let (zip, to) = (zip.to_path_buf(), staging.clone());
         tokio::task::spawn_blocking(move || unpack(&zip, &to)).await.map_err(|e| Error::Internal(e.to_string()))??;
@@ -198,14 +208,20 @@ pub async fn restore(zip: &Path, data_dir: &Path) -> Result<Restored> {
     r
 }
 
-/// The only names an export writes: the database and `images/<64 hex>.<png|jpg|webp>`.
+fn is_hash(h: &str) -> bool {
+    h.len() == 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The only names an export writes: the database, `images/<64 hex>.<png|jpg|webp>` and `assets/<64 hex>`.
 fn entry_path(name: &str) -> Option<PathBuf> {
     if name == DB_FILE {
         return Some(PathBuf::from(DB_FILE));
     }
+    if let Some(hash) = name.strip_prefix("assets/") {
+        return is_hash(hash).then(|| Path::new(IMAGES).join(ASSETS).join(hash));
+    }
     let (hash, ext) = name.strip_prefix("images/")?.split_once('.')?;
-    let hash_ok = hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    (hash_ok && matches!(ext, "png" | "jpg" | "webp")).then(|| Path::new(IMAGES).join(format!("{hash}.{ext}")))
+    (is_hash(hash) && matches!(ext, "png" | "jpg" | "webp")).then(|| Path::new(IMAGES).join(format!("{hash}.{ext}")))
 }
 
 fn unpack(zip: &Path, staging: &Path) -> Result<()> {
@@ -215,7 +231,7 @@ fn unpack(zip: &Path, staging: &Path) -> Result<()> {
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(zerr)?;
         let name = entry.name().map_err(zerr)?.to_string();
-        if entry.is_dir() && name == "images/" {
+        if entry.is_dir() && (name == "images/" || name == "assets/") {
             continue;
         }
         let Some(rel) = entry_path(&name).filter(|_| !entry.is_dir() && !entry.is_symlink()) else {
@@ -261,10 +277,19 @@ async fn validate(staging: &Path) -> Result<()> {
         }
     }
     let images: Vec<(String, String)> = sqlx::query_as("SELECT hash, mime FROM images").fetch_all(&mut conn).await.map_err(unusable)?;
+    // A backup made before assets existed has no such table.
+    let has_assets: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'assets'").fetch_one(&mut conn).await.map_err(unusable)?;
+    let assets: Vec<String> = if has_assets > 0 { sqlx::query_scalar("SELECT hash FROM assets").fetch_all(&mut conn).await.map_err(unusable)? } else { Vec::new() };
     conn.close().await.map_err(unusable)?;
 
     let dir = staging.join(IMAGES);
     tokio::task::spawn_blocking(move || {
+        for hash in assets {
+            let bytes = fs::read(dir.join(ASSETS).join(&hash)).map_err(|_| bad(format!("the archive lacks the asset {hash}")))?;
+            if hex(&Sha256::digest(&bytes)) != hash {
+                return Err(bad(format!("asset {hash} does not match its sha256")));
+            }
+        }
         for (hash, mime) in images {
             let ext = crate::images::ext(&mime).ok_or_else(|| bad(format!("image {hash} has a type ({mime}) mealier does not store")))?;
             let bytes = fs::read(dir.join(format!("{hash}.{ext}"))).map_err(|_| bad(format!("the archive lacks the image {hash}.{ext}")))?;

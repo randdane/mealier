@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Link ingredients - {{ name }} - mealier{% endblock %}
+{% block content %}
+<h1>Link ingredients: {{ name }}</h1>
+<p>Tick the ingredient lines each step uses. Cook mode shows them under the step.</p>
+{% if unlinkable %}<p class="note">Some lines have no id yet: <a href="/recipes/{{ id }}/edit">save the recipe once</a> and come back.</p>{% endif %}
+<form method="post" action="/recipes/{{ id }}/link-ingredients">
+  <table class="link">
+    <thead><tr><th>Step</th>{% for l in lines %}<th>{{ l }}</th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr><th>{% if !r.title.is_empty() %}<strong>{{ r.title }}</strong> {% endif %}{{ r.text }}</th>
+      {% for c in r.cells %}<td><input type="checkbox" name="link" value="{{ c.value }}"{% if c.checked %} checked{% endif %}></td>{% endfor %}</tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="buttons"><button type="submit">Save links</button> <a href="/recipes/{{ id }}">Cancel</a></div>
+</form>
+{% endblock %}

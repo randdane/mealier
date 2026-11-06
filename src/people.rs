@@ -79,6 +79,7 @@ pub struct ShoppingItem {
     pub recipe_id: Option<i64>,
     /// The item's own label; its food's applies when this is empty.
     pub label_id: Option<i64>,
+    pub extras: std::collections::BTreeMap<String, String>,
 }
 
 /// Items under one label (`None`: no label), in the list's section order.
@@ -95,6 +96,7 @@ pub struct ShoppingList {
     pub items: Vec<ShoppingItem>,
     /// The same items by effective label (item's, else food's, else none); empty sections left out.
     pub sections: Vec<ShoppingSection>,
+    pub extras: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
@@ -103,7 +105,7 @@ pub struct Image {
     pub mime: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct Comment {
     pub user_id: Option<i64>,
     pub text: String,
@@ -249,19 +251,20 @@ impl Db {
     }
 
     pub async fn shopping_list(&self, sc: &Scope, id: i64) -> Result<ShoppingList> {
-        let name: String = sqlx::query_scalar("SELECT name FROM shopping_lists WHERE id = ? AND household_id = ?")
+        let (name, extras): (String, String) = sqlx::query_as("SELECT name, extras FROM shopping_lists WHERE id = ? AND household_id = ?")
             .bind(id)
             .bind(sc.household_id)
             .fetch_optional(&self.pool)
             .await?
             .ok_or(Error::NotFound("shopping list"))?;
-        let rows = sqlx::query("SELECT id, qty, COALESCE(qty_max, qty), unit_id, food_id, note, checked, recipe_id, label_id FROM shopping_list_items WHERE list_id = ? ORDER BY id")
+        let rows = sqlx::query("SELECT id, qty, COALESCE(qty_max, qty), unit_id, food_id, note, checked, recipe_id, label_id, extras FROM shopping_list_items WHERE list_id = ? ORDER BY id")
             .bind(id)
             .fetch_all(&self.pool)
             .await?;
         let items: Vec<ShoppingItem> = rows
             .iter()
-            .map(|r| ShoppingItem {
+            .map(|r| -> Result<ShoppingItem> {
+                Ok(ShoppingItem {
                 id: r.get(0),
                 qty: r.get(1),
                 qty_max: r.get(2),
@@ -271,11 +274,13 @@ impl Db {
                 checked: r.get(6),
                 recipe_id: r.get(7),
                 label_id: r.get(8),
+                extras: serde_json::from_str(r.get(9))?,
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
         let items: Vec<ShoppingItem> = items;
         let sections = self.sections(sc, id, &items).await?;
-        Ok(ShoppingList { id, name, items, sections })
+        Ok(ShoppingList { id, name, items, sections, extras: serde_json::from_str(&extras)? })
     }
 
     /// The mime type of the image named by `hash`, if a recipe in the caller's group or a batch of their household uses it.

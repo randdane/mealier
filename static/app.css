@@ -66,3 +66,13 @@ details summary { cursor: pointer; color: var(--accent); }
 .cook-max-white { --bg: #fff; --fg: #000; --muted: #000; --line: #000; --accent: #000; --field: #fff; color-scheme: light; font-weight: 900; }
 .cook-max-white a { text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+/* Recipe features */
+.alt, .uses { color: var(--muted); font-size: .9em; }
+.uses { display: block; margin-left: 2rem; }
+fieldset { border: 1px solid var(--line); border-radius: .4rem; margin: 1rem 0; }
+.row { display: flex; flex-wrap: wrap; gap: .5rem; margin: .3rem 0; }
+.row input[type=text] { flex: 1 1 8rem; width: auto; }
+.row textarea { flex: 2 1 12rem; width: auto; }
+table.link td { text-align: center; }
+table.link th:first-child { min-width: 10rem; }

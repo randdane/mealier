@@ -32,6 +32,8 @@ pub struct ErrorBody {
     crate::households::list_groups, crate::households::create_group, crate::households::list_households, crate::households::create_household,
     crate::households::get_default, crate::households::put_default, crate::households::move_user,
     crate::cookbooks::list_cookbooks, crate::cookbooks::create_cookbook, crate::cookbooks::get_cookbook, crate::cookbooks::put_cookbook, crate::cookbooks::delete_cookbook_route, crate::cookbooks::cookbook_recipes_route,
+    crate::features::upload_asset, crate::features::list_assets, crate::features::delete_asset, crate::features::download_asset, crate::features::post_comment, crate::features::list_comments,
+    crate::features::get_food, crate::features::put_food_extras, crate::features::list_food_substitutions, crate::features::add_food_substitution_route, crate::features::put_food_substitution, crate::features::delete_food_substitution, crate::features::put_list_extras,
     crate::rules::list_rules, crate::rules::create_rule, crate::rules::get_rule, crate::rules::put_rule, crate::rules::delete_rule_route, crate::rules::suggest_route
 ), modifiers(&BearerScheme), security(("bearer" = [])))]
 struct ApiDoc;
@@ -601,6 +603,13 @@ pub struct AppState {
     pub images_dir: PathBuf,
 }
 
+impl AppState {
+    /// Assets sit beside the images, in `<images dir>/assets/<sha256>`, so an export and a restore carry them with the images.
+    pub fn assets_dir(&self) -> PathBuf {
+        self.images_dir.join("assets")
+    }
+}
+
 impl FromRef<AppState> for Db {
     fn from_ref(s: &AppState) -> Db {
         s.db.clone()
@@ -668,6 +677,7 @@ pub fn router_with_restart(state: AppState, import: ImportService, auth: crate::
         .merge(crate::households::routes())
         .merge(crate::cookbooks::routes())
         .merge(crate::rules::routes())
+        .merge(crate::features::routes())
         .merge(crate::backup::routes())
         .layer(Extension(restart))
         .layer(Extension(Arc::new(import)))

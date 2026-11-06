@@ -11,7 +11,7 @@ use serde::Deserialize;
 use super::{Svc, amount, id_of, num, number, opt};
 use crate::api::{AppState, PHOTO_BODY_LIMIT};
 use crate::parse::parsed_input;
-use crate::{Db, Dimension, Error, IngredientInput, RecipeInput, Result, Scope};
+use crate::{Db, Dimension, Error, IngredientInput, LineDetail, Note, RecipeInput, Result, Scope, Settings, StepDetail, Substitution};
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -25,6 +25,9 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/recipes/{id}/nutrition/estimate", post(nutrition_fragment))
         .route("/recipes/{id}/ingredients/review", get(review_page).post(review_save))
         .route("/recipes/{id}/cook", get(cook_page))
+        .route("/recipes/{id}/link-ingredients", get(link_page).post(link_save))
+        .route("/recipes/{id}/assets", post(add_asset).layer(DefaultBodyLimit::max(crate::MAX_ASSET_BYTES + 1024 * 1024)))
+        .route("/recipes/{id}/assets/{hash}/delete", post(delete_asset))
 }
 
 #[derive(Template, WebTemplate)]
@@ -53,6 +56,29 @@ struct BatchRow {
     rating: String,
 }
 
+/// A run of ingredient lines under one section title (the first run may have none).
+struct IngGroup {
+    title: String,
+    lines: Vec<IngLine>,
+}
+
+struct IngLine {
+    text: String,
+    /// "or ..." texts: the line's own substitutions, then its food's.
+    alternatives: Vec<String>,
+}
+
+struct StepView {
+    title: String,
+    text: String,
+}
+
+struct AssetView {
+    name: String,
+    file_name: String,
+    hash: String,
+}
+
 #[derive(Template, WebTemplate)]
 #[template(path = "recipe.html")]
 struct RecipePage {
@@ -62,16 +88,44 @@ struct RecipePage {
     today: String,
     name: String,
     description: String,
-    ingredients: Vec<String>,
-    steps: Vec<String>,
+    groups: Vec<IngGroup>,
+    steps: Vec<StepView>,
     batches: Vec<BatchRow>,
     /// File name of the recipe's image, empty when it has none.
     image: String,
+    locked: bool,
+    nutrition: Vec<String>,
+    notes: Vec<Note>,
+    extras: Vec<(String, String)>,
+    assets: Vec<AssetView>,
+}
+
+/// "1.5 tbsp butter (note)" for a substitution, as shown after "or".
+fn alternative(qty: Option<f64>, unit: Option<&str>, food: Option<&str>, note: &str) -> String {
+    let what = [amount(qty, qty, unit), food.unwrap_or_default().to_string()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+    match (what.is_empty(), note.is_empty()) {
+        (_, true) => what,
+        (true, false) => note.to_string(),
+        (false, false) => format!("{what} ({note})"),
+    }
 }
 
 async fn recipe_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<RecipePage> {
     let r = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?;
-    let ingredients = r.content.ingredients.iter().map(|i| ingredient_line(i, 1.0)).collect();
+    let c = r.content;
+    let foods: Vec<i64> = c.ingredients.iter().filter_map(|i| i.food_id).collect();
+    let by_food = db.substitutes_of(&sc, &foods).await?;
+    let mut groups: Vec<IngGroup> = Vec::new();
+    for i in &c.ingredients {
+        if groups.is_empty() || !i.section.is_empty() {
+            groups.push(IngGroup { title: i.section.clone(), lines: Vec::new() });
+        }
+        let own = i.substitutions.iter().map(|s| alternative(s.qty, s.unit.as_deref(), s.food.as_deref(), &s.note));
+        let of_food = i.food_id.and_then(|f| by_food.get(&f)).into_iter().flatten().map(|s| alternative(None, None, Some(&s.name), &s.note));
+        let alternatives = own.chain(of_food).filter(|a| !a.is_empty()).map(|a| format!("or {a}")).collect();
+        groups.last_mut().expect("a group was just pushed").lines.push(IngLine { text: ingredient_line(i, 1.0), alternatives });
+    }
+    let steps = c.steps.iter().enumerate().map(|(n, t)| StepView { title: c.step_details.get(n).map(|d| d.title.clone()).unwrap_or_default(), text: t.clone() }).collect();
     let batches = db
         .list_batches(&sc, id)
         .await?
@@ -84,7 +138,28 @@ async fn recipe_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Re
             rating: b.rating.map(|r| r.to_string()).unwrap_or_default(),
         })
         .collect();
-    Ok(RecipePage { id, lists: db.shopping_lists(&sc).await?, slots: crate::SLOTS, today: db.day("now", 0).await?, name: r.content.name, description: r.content.description, ingredients, steps: r.content.steps, batches, image: db.recipe_images(&sc, id).await?.first().map(crate::Image::file_name).unwrap_or_default() })
+    let nutrition = match (&c.nutrition, c.settings.hide_nutrition) {
+        (Some(n), false) => [("Calories", n.calories), ("Protein (g)", n.protein_g), ("Fat (g)", n.fat_g), ("Carbohydrate (g)", n.carbs_g)].into_iter().filter_map(|(k, v)| v.map(|v| format!("{k}: {}", num(v)))).collect(),
+        _ => Vec::new(),
+    };
+    let assets = db.recipe_assets(&sc, id).await?.into_iter().map(|a| AssetView { name: a.name, file_name: a.file_name, hash: a.hash }).collect();
+    Ok(RecipePage {
+        id,
+        lists: db.shopping_lists(&sc).await?,
+        slots: crate::SLOTS,
+        today: db.day("now", 0).await?,
+        name: c.name,
+        description: c.description,
+        groups,
+        steps,
+        batches,
+        image: db.recipe_images(&sc, id).await?.first().map(crate::Image::file_name).unwrap_or_default(),
+        locked: c.settings.locked,
+        nutrition,
+        notes: c.notes,
+        extras: c.extras.into_iter().collect(),
+        assets,
+    })
 }
 
 /// One ingredient as text, amounts times `scale`; falls back to the original text.
@@ -96,6 +171,13 @@ fn ingredient_line(i: &crate::Ingredient, scale: f64) -> String {
     if line.trim().is_empty() { i.original_text.clone() } else { line.trim().to_string() }
 }
 
+struct CookStep {
+    title: String,
+    text: String,
+    /// The ingredient lines this step uses, as shown in the ingredients list.
+    uses: Vec<String>,
+}
+
 #[derive(Template, WebTemplate)]
 #[template(path = "cook.html")]
 struct CookPage {
@@ -105,7 +187,7 @@ struct CookPage {
     /// Names this cook in the browser's storage: `recipe:<id>` or `batch:<id>`.
     key: String,
     ingredients: Vec<String>,
-    steps: Vec<String>,
+    steps: Vec<CookStep>,
     theme: String,
     /// Where "back" goes, and where the theme form returns to.
     back: String,
@@ -133,38 +215,52 @@ async fn cook_page(
         return Err(Error::Validation("scale must be a positive number".into()));
     }
     // A batch is cooked from its own snapshot, never the live recipe; imported history has none.
-    let (content, ingredients, back, historical_unavailable, key) = match q.batch {
+    // `by_line` is the text of each of the content's ingredient lines, in order, for the "uses" under a step.
+    let (content, ingredients, by_line, back, historical_unavailable, key) = match q.batch {
         Some(bid) => {
             let b = db.get_batch(&sc, bid).await?;
             if b.batch.recipe_id != id {
                 return Err(Error::NotFound("batch"));
             }
-            let lines = b
-                .lines
-                .iter()
-                .map(|l| {
-                    let sub = if l.substitution.is_empty() { String::new() } else { format!(" (instead: {})", l.substitution) };
-                    let line = [amount(l.qty_min, l.qty_max, l.unit_name.as_deref()), l.ingredient.clone()];
-                    format!("{}{sub}", line.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "))
-                })
-                .collect();
+            let text = |l: &crate::BatchLine| {
+                let sub = if l.substitution.is_empty() { String::new() } else { format!(" (instead: {})", l.substitution) };
+                let line = [amount(l.qty_min, l.qty_max, l.unit_name.as_deref()), l.ingredient.clone()];
+                format!("{}{sub}", line.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "))
+            };
+            let lines: Vec<String> = b.lines.iter().map(text).collect();
             let (content, missing) = match b.batch.snapshot_id {
                 Some(s) => (db.snapshot(&sc, s).await?.content, false),
                 None => (r.content, true),
             };
-            (content, lines, format!("/batches/{bid}"), missing, format!("batch:{bid}"))
+            // The batch's lines that came from the snapshot are in the snapshot's order; added ones follow their own.
+            let by_line = if missing {
+                content.ingredients.iter().map(|i| ingredient_line(i, b.batch.scale)).collect()
+            } else {
+                b.lines.iter().filter(|l| !l.added).map(text).collect()
+            };
+            (content, lines, by_line, format!("/batches/{bid}"), missing, format!("batch:{bid}"))
         }
         None => {
-            let lines = r.content.ingredients.iter().map(|i| ingredient_line(i, scale)).collect();
-            (r.content, lines, format!("/recipes/{id}"), false, format!("recipe:{id}"))
+            let lines: Vec<String> = r.content.ingredients.iter().map(|i| ingredient_line(i, scale)).collect();
+            (r.content, lines.clone(), lines, format!("/recipes/{id}"), false, format!("recipe:{id}"))
         }
     };
+    let steps = content
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(n, text)| {
+            let d = content.step_details.get(n);
+            let uses = d.into_iter().flat_map(|d| &d.ingredient_uids).filter_map(|u| content.ingredients.iter().position(|i| &i.uid == u)).filter_map(|p| by_line.get(p).cloned()).collect();
+            CookStep { title: d.map(|d| d.title.clone()).unwrap_or_default(), text: text.clone(), uses }
+        })
+        .collect();
     Ok(CookPage {
         name: content.name,
         historical_unavailable,
         key,
         ingredients,
-        steps: content.steps,
+        steps,
         theme: user.cook_theme,
         back,
         here: uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default(),
@@ -172,15 +268,39 @@ async fn cook_page(
     })
 }
 
+struct NoteRow {
+    title: String,
+    text: String,
+}
+
+struct ExtraRow {
+    key: String,
+    value: String,
+}
+
+struct SubRow {
+    /// 1-based number of the ingredient line (section titles not counted); empty on a blank row.
+    line: String,
+    qty: String,
+    unit: String,
+    food: String,
+    note: String,
+}
+
+/// The settings checkboxes: (field name, label, ticked).
+type Flag = (&'static str, &'static str, bool);
+
 #[derive(Template, WebTemplate)]
 #[template(path = "recipe_form.html")]
 struct RecipeForm {
     heading: &'static str,
     action: String,
+    /// 0 on the new-recipe form.
+    id: i64,
     name: String,
     description: String,
     ingredients: String,
-    /// One per line.
+    /// One per line; a `## ` line titles the step after it.
     steps: String,
     /// Comma separated.
     tags: String,
@@ -191,7 +311,27 @@ struct RecipeForm {
     image: String,
     /// The nutrition fieldset, already rendered.
     nutrition: String,
+    notes: Vec<NoteRow>,
+    extras: Vec<ExtraRow>,
+    subs: Vec<SubRow>,
+    flags: Vec<Flag>,
+    assets: Vec<AssetView>,
 }
+
+fn flags(s: &Settings) -> Vec<Flag> {
+    vec![
+        ("locked", "Locked (edits are refused until this is unticked)", s.locked),
+        ("hide_nutrition", "Hide nutrition", s.hide_nutrition),
+        ("disable_comments", "Disable comments", s.disable_comments),
+        ("public", "Public (kept from Mealie, not used)", s.public),
+        ("show_assets", "Show assets (kept from Mealie, not used)", s.show_assets),
+        ("landscape_view", "Landscape view (kept from Mealie, not used)", s.landscape_view),
+        ("disable_amount", "Disable amounts (kept from Mealie, not used)", s.disable_amount),
+    ]
+}
+
+/// Two empty rows after the filled ones, so there is always somewhere to type; saving shows two more.
+const BLANK_ROWS: usize = 2;
 
 /// The nutrition inputs; also what the estimate button swaps in. `id` is 0 on the new-recipe form.
 #[derive(Template)]
@@ -217,22 +357,59 @@ impl NutritionFields {
 }
 
 async fn new_recipe_page() -> Result<RecipeForm> {
-    Ok(RecipeForm {
-        heading: "New recipe",
-        action: "/recipes".into(),
-        name: String::new(),
-        description: String::new(),
-        ingredients: String::new(),
-        steps: String::new(),
-        tags: String::new(),
-        categories: String::new(),
-        tools: String::new(),
-        cookbooks: String::new(),
-        image: String::new(),
-        nutrition: NutritionFields::new(0, false, None).html()?,
-    })
+    Ok(form_for(0, "New recipe", "/recipes".into(), &crate::Content::default(), Vec::new(), String::new(), NutritionFields::new(0, false, None).html()?))
 }
 
+/// The form for `c`. `ingredients` and `steps` are the textareas' text.
+#[allow(clippy::too_many_arguments)]
+fn form_for(id: i64, heading: &'static str, action: String, c: &crate::Content, assets: Vec<AssetView>, image: String, nutrition: String) -> RecipeForm {
+    let mut ingredients = Vec::new();
+    for i in &c.ingredients {
+        if !i.section.is_empty() {
+            ingredients.push(format!("## {}", i.section));
+        }
+        ingredients.push(if i.original_text.is_empty() { ingredient_line(i, 1.0) } else { i.original_text.clone() });
+    }
+    let mut steps = Vec::new();
+    for (n, t) in c.steps.iter().enumerate() {
+        if let Some(d) = c.step_details.get(n).filter(|d| !d.title.is_empty()) {
+            steps.push(format!("## {}", d.title));
+        }
+        steps.push(t.clone());
+    }
+    let blank_note = || NoteRow { title: String::new(), text: String::new() };
+    let mut notes: Vec<NoteRow> = c.notes.iter().map(|n| NoteRow { title: n.title.clone(), text: n.text.clone() }).collect();
+    notes.extend((0..BLANK_ROWS).map(|_| blank_note()));
+    let mut extras: Vec<ExtraRow> = c.extras.iter().map(|(k, v)| ExtraRow { key: k.clone(), value: v.clone() }).collect();
+    extras.extend((0..BLANK_ROWS).map(|_| ExtraRow { key: String::new(), value: String::new() }));
+    let mut subs = Vec::new();
+    for (n, i) in c.ingredients.iter().enumerate() {
+        for s in &i.substitutions {
+            subs.push(SubRow { line: (n + 1).to_string(), qty: opt(s.qty), unit: s.unit.clone().unwrap_or_default(), food: s.food.clone().unwrap_or_default(), note: s.note.clone() });
+        }
+    }
+    subs.extend((0..BLANK_ROWS).map(|_| SubRow { line: String::new(), qty: String::new(), unit: String::new(), food: String::new(), note: String::new() }));
+    RecipeForm {
+        heading,
+        action,
+        id,
+        name: c.name.clone(),
+        description: c.description.clone(),
+        ingredients: ingredients.join("\n"),
+        steps: steps.join("\n"),
+        tags: c.tags.join(", "),
+        categories: c.categories.join(", "),
+        tools: c.tools.join(", "),
+        cookbooks: c.cookbooks.join(", "),
+        image,
+        nutrition,
+        notes,
+        extras,
+        subs,
+        flags: flags(&c.settings),
+        assets,
+    }
+}
 
 /// The LLM's nutrition guess for a recipe. Recipe first, so an unknown id costs no request.
 pub(crate) async fn estimate_recipe(db: &Db, sc: &Scope, svc: &crate::ImportService, id: i64) -> Result<crate::NutritionEstimate> {
@@ -251,26 +428,10 @@ async fn nutrition_fragment(sc: Scope, State(db): State<Db>, axum::Extension(svc
 
 async fn edit_recipe_page(sc: Scope, State(db): State<Db>, axum::Extension(svc): Svc, Path(id): Path<i64>) -> Result<RecipeForm> {
     let r = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?;
-    let lines: Vec<String> = r
-        .content
-        .ingredients
-        .iter()
-        .map(|i| if i.original_text.is_empty() { ingredient_line(i, 1.0) } else { i.original_text.clone() })
-        .collect();
-    Ok(RecipeForm {
-        heading: "Edit recipe",
-        action: format!("/recipes/{id}/edit"),
-        name: r.content.name,
-        description: r.content.description,
-        ingredients: lines.join("\n"),
-        steps: r.content.steps.join("\n"),
-        tags: r.content.tags.join(", "),
-        categories: r.content.categories.join(", "),
-        tools: r.content.tools.join(", "),
-        cookbooks: r.content.cookbooks.join(", "),
-        image: db.recipe_images(&sc, id).await?.first().map(crate::Image::file_name).unwrap_or_default(),
-        nutrition: NutritionFields::new(id, svc.llm().is_some(), r.content.nutrition.as_ref()).html()?,
-    })
+    let assets = db.recipe_assets(&sc, id).await?.into_iter().map(|a| AssetView { name: a.name, file_name: a.file_name, hash: a.hash }).collect();
+    let image = db.recipe_images(&sc, id).await?.first().map(crate::Image::file_name).unwrap_or_default();
+    let nutrition = NutritionFields::new(id, svc.llm().is_some(), r.content.nutrition.as_ref()).html()?;
+    Ok(form_for(id, "Edit recipe", format!("/recipes/{id}/edit"), &r.content, assets, image, nutrition))
 }
 
 #[derive(Deserialize)]
@@ -297,6 +458,22 @@ fn lines(v: &str) -> Vec<String> {
     v.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
 }
 
+/// Lines where a `## Title` line gives the next line a title: `(title, text)` per real line.
+/// A title with nothing after it is refused rather than dropped.
+fn titled(v: &str, what: &str) -> Result<Vec<(String, String)>> {
+    let (mut out, mut pending) = (Vec::new(), String::new());
+    for l in lines(v) {
+        match l.strip_prefix("##") {
+            Some(t) => pending = t.trim().to_string(),
+            None => out.push((std::mem::take(&mut pending), l)),
+        }
+    }
+    if !pending.is_empty() {
+        return Err(Error::Validation(format!("a {what} title (## ...) needs a line after it")));
+    }
+    Ok(out)
+}
+
 /// Comma separated names, trimmed, without blanks or repeats.
 fn names(v: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -311,6 +488,8 @@ fn names(v: &str) -> Vec<String> {
 /// The recipe form: urlencoded, or multipart when it carries an image. Both end up as the same fields.
 struct Submission {
     form: RecipeFormData,
+    /// Every field in order, repeats included (the rows of notes, extras and substitutions).
+    pairs: Vec<(String, String)>,
     /// The file chosen in the `image` field; none when the field is empty.
     image: Option<axum::body::Bytes>,
 }
@@ -320,23 +499,102 @@ impl<S: Send + Sync> FromRequest<S> for Submission {
     async fn from_request(req: Request, state: &S) -> Result<Self> {
         let bad = |e: &dyn std::fmt::Display| Error::Validation(format!("bad form: {e}"));
         let multipart = req.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("multipart/form-data"));
+        let (mut pairs, mut image): (Vec<(String, String)>, _) = (Vec::new(), None);
         if !multipart {
             let body = axum::body::Bytes::from_request(req, state).await.map_err(|e| bad(&e))?;
-            return Ok(Submission { form: serde_urlencoded::from_bytes(&body).map_err(|e| bad(&e))?, image: None });
-        }
-        let mut parts = Multipart::from_request(req, state).await.map_err(|e| bad(&e))?;
-        let (mut pairs, mut image) = (Vec::new(), None);
-        while let Some(field) = parts.next_field().await.map_err(|e| bad(&e))? {
-            let name = field.name().unwrap_or_default().to_string();
-            if name == "image" {
-                image = Some(field.bytes().await.map_err(|e| bad(&e))?).filter(|b| !b.is_empty());
-            } else {
-                pairs.push((name, field.text().await.map_err(|e| bad(&e))?));
+            pairs = serde_urlencoded::from_bytes(&body).map_err(|e| bad(&e))?;
+        } else {
+            let mut parts = Multipart::from_request(req, state).await.map_err(|e| bad(&e))?;
+            while let Some(field) = parts.next_field().await.map_err(|e| bad(&e))? {
+                let name = field.name().unwrap_or_default().to_string();
+                if name == "image" {
+                    image = Some(field.bytes().await.map_err(|e| bad(&e))?).filter(|b| !b.is_empty());
+                } else {
+                    pairs.push((name, field.text().await.map_err(|e| bad(&e))?));
+                }
             }
         }
-        let form = serde_urlencoded::from_str(&serde_urlencoded::to_string(&pairs).map_err(|e| bad(&e))?).map_err(|e| bad(&e))?;
-        Ok(Submission { form, image })
+        // The struct takes the plain fields; a repeated key (a row) is not one of them.
+        let plain: Vec<_> = pairs.iter().filter(|(k, _)| !ROW_FIELDS.contains(&k.as_str())).collect();
+        let form = serde_urlencoded::from_str(&serde_urlencoded::to_string(&plain).map_err(|e| bad(&e))?).map_err(|e| bad(&e))?;
+        Ok(Submission { form, pairs, image })
     }
+}
+
+/// Fields that come in rows, or are checkboxes; read from the pairs, not the struct.
+const ROW_FIELDS: [&str; 18] = [
+    "features", "note_title", "note_text", "extra_key", "extra_value", "sub_line", "sub_qty", "sub_unit", "sub_food", "sub_note",
+    "locked", "hide_nutrition", "disable_comments", "public", "show_assets", "landscape_view", "disable_amount", "link",
+];
+
+/// What the rows of the form say about notes, extras, substitutions and settings; `None` when the form carried
+/// no `features` marker (an older form, or an API-style post), which leaves all of them as they are.
+struct Rows {
+    notes: Vec<Note>,
+    extras: std::collections::BTreeMap<String, String>,
+    /// (1-based ingredient line number, substitution)
+    subs: Vec<(usize, Substitution)>,
+    settings: Settings,
+}
+
+fn rows(pairs: &[(String, String)]) -> Result<Option<Rows>> {
+    if !pairs.iter().any(|(k, _)| k == "features") {
+        return Ok(None);
+    }
+    let has = |k: &str| pairs.iter().any(|(n, _)| n == k);
+    let mut notes: Vec<Note> = Vec::new();
+    let mut extras = std::collections::BTreeMap::new();
+    let mut raw_extras: Vec<(String, String)> = Vec::new();
+    // (line, qty, unit, food, note) as typed
+    let mut subs: Vec<[String; 5]> = Vec::new();
+    for (k, v) in pairs {
+        let v = v.clone();
+        match k.as_str() {
+            "note_title" => notes.push(Note { title: v, text: String::new() }),
+            "note_text" => match notes.last_mut() {
+                Some(n) if n.text.is_empty() => n.text = v,
+                _ => notes.push(Note { title: String::new(), text: v }),
+            },
+            "extra_key" => raw_extras.push((v, String::new())),
+            "extra_value" => {
+                if let Some(e) = raw_extras.last_mut() {
+                    e.1 = v;
+                }
+            }
+            "sub_line" => subs.push([v, String::new(), String::new(), String::new(), String::new()]),
+            "sub_qty" | "sub_unit" | "sub_food" | "sub_note" => {
+                let col = ["sub_qty", "sub_unit", "sub_food", "sub_note"].iter().position(|c| c == k).expect("matched above") + 1;
+                if let Some(r) = subs.last_mut() {
+                    r[col] = v;
+                }
+            }
+            _ => {}
+        }
+    }
+    notes.retain(|n| !(n.title.trim().is_empty() && n.text.trim().is_empty()));
+    for (k, v) in raw_extras {
+        if !(k.trim().is_empty() && v.trim().is_empty()) {
+            extras.insert(k, v);
+        }
+    }
+    let mut out = Vec::new();
+    for r in subs {
+        if r.iter().all(|x| x.trim().is_empty()) {
+            continue;
+        }
+        let line: usize = r[0].trim().parse().ok().filter(|n| *n >= 1).ok_or_else(|| Error::Validation("a substitution needs the number of its ingredient line".into()))?;
+        out.push((line, Substitution { qty: number(&r[1])?, unit: Some(r[2].clone()), food: Some(r[3].clone()), note: r[4].clone() }));
+    }
+    let settings = Settings {
+        locked: has("locked"),
+        hide_nutrition: has("hide_nutrition"),
+        disable_comments: has("disable_comments"),
+        public: has("public"),
+        show_assets: has("show_assets"),
+        landscape_view: has("landscape_view"),
+        disable_amount: has("disable_amount"),
+    };
+    Ok(Some(Rows { notes, extras, subs: out, settings }))
 }
 
 impl RecipeFormData {
@@ -371,13 +629,20 @@ async fn import_form(sc: Scope, State(s): State<AppState>, axum::Extension(svc):
     Ok(Redirect::to(&review_url(r.id, &suggested)))
 }
 
-async fn create_recipe(sc: Scope, State(s): State<AppState>, axum::Extension(svc): Svc, Submission { form: f, image }: Submission) -> Result<Redirect> {
+async fn create_recipe(sc: Scope, State(s): State<AppState>, axum::Extension(svc): Svc, Submission { form: f, pairs, image }: Submission) -> Result<Redirect> {
     let db = &s.db;
     let (units, foods) = (db.units(&sc).await?, db.foods(&sc).await?);
     let nutrition = f.nutrition()?.flatten();
-    let mut ingredients: Vec<IngredientInput> = f.ingredients.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| parsed_input(l, &units, &foods)).collect();
+    let typed = titled(&f.ingredients, "section")?;
+    let mut ingredients: Vec<IngredientInput> = typed.iter().map(|(_, l)| parsed_input(l, &units, &foods)).collect();
     let all = vec![true; ingredients.len()];
     let suggested = svc.fill_lines(&mut ingredients, &all, &units, &foods).await;
+    let mut details: Vec<LineDetail> = typed.iter().map(|(section, _)| LineDetail { section: section.clone(), ..Default::default() }).collect();
+    let rows = rows(&pairs)?;
+    if let Some(r) = &rows {
+        add_subs(&mut details, &r.subs)?;
+    }
+    let steps = f.steps.as_deref().map(|v| titled(v, "step")).transpose()?.unwrap_or_default();
     let photo = match image {
         Some(bytes) => Some(crate::images::prepare(&bytes).await?),
         None => None,
@@ -391,26 +656,76 @@ async fn create_recipe(sc: Scope, State(s): State<AppState>, axum::Extension(svc
         cookbooks: f.cookbooks.as_deref().map(names).unwrap_or_default(),
         tools: f.tools.as_deref().map(names).unwrap_or_default(),
         ingredients,
-        steps: f.steps.as_deref().map(lines).unwrap_or_default(),
+        ingredient_details: details,
+        step_details: steps.iter().map(|(title, _)| StepDetail { title: title.clone(), ..Default::default() }).collect(),
+        steps: steps.into_iter().map(|(_, t)| t).collect(),
+        notes: rows.as_ref().map(|r| r.notes.clone()),
+        extras: rows.as_ref().map(|r| r.extras.clone()),
+        settings: rows.map(|r| r.settings),
         ..Default::default()
     };
     let r = db.create_recipe_with(&sc, input, photo.as_ref().map(|p| (p, s.images_dir.as_path()))).await?;
     Ok(Redirect::to(&review_url(r.id, &suggested)))
 }
 
-async fn edit_recipe(sc: Scope, State(s): State<AppState>, axum::Extension(svc): Svc, Path(id): Path<i64>, Submission { form: f, image }: Submission) -> Result<Redirect> {
+/// Puts each typed substitution on its ingredient line (numbered from 1).
+fn add_subs(details: &mut [LineDetail], subs: &[(usize, Substitution)]) -> Result<()> {
+    let count = details.len();
+    for (line, s) in subs {
+        let d = details.get_mut(line - 1).ok_or_else(|| Error::Validation(format!("substitution for ingredient line {line}, but there are only {count}")))?;
+        d.substitutions.push(s.clone());
+    }
+    Ok(())
+}
+
+async fn edit_recipe(sc: Scope, State(s): State<AppState>, axum::Extension(svc): Svc, Path(id): Path<i64>, Submission { form: f, pairs, image }: Submission) -> Result<Redirect> {
     let db = &s.db;
     let old = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?.content;
     let (units, foods) = (db.units(&sc).await?, db.foods(&sc).await?);
-    let nutrition = f.nutrition()?.unwrap_or(old.nutrition);
-    // A line left as it was keeps what the user already reviewed (and is not sent to the LLM again); only new or changed text is parsed.
-    let (mut ingredients, mut is_new) = (Vec::new(), Vec::new());
-    for l in f.ingredients.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let known = old.ingredients.iter().find(|i| i.original_text == l);
+    let nutrition = f.nutrition()?.unwrap_or(old.nutrition.clone());
+    let rows = rows(&pairs)?;
+    // A line left as it was keeps what the user already reviewed (and is not sent to the LLM again), and its id,
+    // so steps still link to it; only new or changed text is parsed. Each old line is claimed once, so two equal
+    // lines stay two lines.
+    let (mut ingredients, mut is_new, mut details) = (Vec::new(), Vec::new(), Vec::new());
+    let mut claimed = vec![false; old.ingredients.len()];
+    for (section, l) in titled(&f.ingredients, "section")? {
+        let known = old.ingredients.iter().enumerate().find(|(n, i)| !claimed[*n] && i.original_text == l);
+        if let Some((n, _)) = known {
+            claimed[n] = true;
+        }
         is_new.push(known.is_none());
-        ingredients.push(known.map_or_else(|| parsed_input(l, &units, &foods), IngredientInput::from));
+        ingredients.push(known.map_or_else(|| parsed_input(&l, &units, &foods), |(_, i)| IngredientInput::from(i)));
+        details.push(LineDetail {
+            uid: known.map(|(_, i)| i.uid.clone()),
+            section,
+            // The rows of the form are the whole truth once the form sends them; an older post leaves them be.
+            substitutions: known.filter(|_| rows.is_none()).map(|(_, i)| i.substitutions.clone()).unwrap_or_default(),
+        });
+    }
+    if let Some(r) = &rows {
+        add_subs(&mut details, &r.subs)?;
     }
     let suggested = svc.fill_lines(&mut ingredients, &is_new, &units, &foods).await;
+    // The same for steps: the text decides which old step this is, so its links carry over (to lines that are still there).
+    let step_texts = f.steps.as_deref().map(|v| titled(v, "step")).transpose()?;
+    let (steps, step_details) = match step_texts {
+        None => (old.steps.clone(), old.step_details.clone()),
+        Some(typed) => {
+            let mut taken = vec![false; old.steps.len()];
+            let surviving: Vec<&str> = details.iter().filter_map(|d| d.uid.as_deref()).collect();
+            let mut out = Vec::new();
+            for (title, text) in &typed {
+                let from = old.steps.iter().enumerate().find(|(n, t)| !taken[*n] && *t == text).map(|(n, _)| n);
+                if let Some(n) = from {
+                    taken[n] = true;
+                }
+                let links = from.and_then(|n| old.step_details.get(n)).map(|d| d.ingredient_uids.iter().filter(|u| surviving.contains(&u.as_str())).cloned().collect()).unwrap_or_default();
+                out.push(StepDetail { title: title.clone(), ingredient_uids: links });
+            }
+            (typed.into_iter().map(|(_, t)| t).collect(), out)
+        }
+    };
     let photo = match image {
         Some(bytes) => Some(crate::images::prepare(&bytes).await?),
         None => None,
@@ -428,12 +743,90 @@ async fn edit_recipe(sc: Scope, State(s): State<AppState>, axum::Extension(svc):
             cookbooks: f.cookbooks.as_deref().map(names).unwrap_or(old.cookbooks),
             tools: f.tools.as_deref().map(names).unwrap_or(old.tools),
             ingredients,
-            steps: f.steps.as_deref().map(lines).unwrap_or(old.steps),
+            ingredient_details: details,
+            steps,
+            step_details,
+            notes: rows.as_ref().map(|r| r.notes.clone()),
+            extras: rows.as_ref().map(|r| r.extras.clone()),
+            settings: rows.map(|r| r.settings),
         },
         photo.as_ref().map(|p| (p, s.images_dir.as_path())),
     )
     .await?;
     Ok(Redirect::to(&review_url(id, &suggested)))
+}
+
+// ---------- linking ingredients to steps ----------
+
+struct LinkCell {
+    value: String,
+    checked: bool,
+}
+
+struct LinkRow {
+    title: String,
+    text: String,
+    cells: Vec<LinkCell>,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "link.html")]
+struct LinkPage {
+    id: i64,
+    name: String,
+    /// The ingredient lines, as column headings.
+    lines: Vec<String>,
+    rows: Vec<LinkRow>,
+    /// Lines written before step 14 have no id until the recipe is saved once.
+    unlinkable: bool,
+}
+
+async fn link_page(sc: Scope, State(db): State<Db>, Path(id): Path<i64>) -> Result<LinkPage> {
+    let c = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?.content;
+    let rows = c
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(n, text)| {
+            let d = c.step_details.get(n);
+            LinkRow {
+                title: d.map(|d| d.title.clone()).unwrap_or_default(),
+                text: text.clone(),
+                cells: c.ingredients.iter().map(|i| LinkCell { value: format!("{n}:{}", i.uid), checked: d.is_some_and(|d| d.ingredient_uids.contains(&i.uid)) }).collect(),
+            }
+        })
+        .collect();
+    Ok(LinkPage { id, name: c.name.clone(), lines: c.ingredients.iter().map(|i| ingredient_line(i, 1.0)).collect(), rows, unlinkable: c.ingredients.iter().any(|i| i.uid.is_empty()) })
+}
+
+async fn link_save(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, body: axum::body::Bytes) -> Result<Redirect> {
+    let c = db.get_recipe(&sc, id).await?.ok_or(Error::NotFound("recipe"))?.content;
+    let mut details: Vec<StepDetail> = (0..c.steps.len()).map(|n| StepDetail { title: c.step_details.get(n).map(|d| d.title.clone()).unwrap_or_default(), ingredient_uids: Vec::new() }).collect();
+    for (k, v) in super::pairs(&body)? {
+        if k != "link" {
+            continue;
+        }
+        let (step, uid) = v.split_once(':').ok_or_else(|| Error::Validation(format!("'{v}' is not a step and an ingredient line")))?;
+        let step: usize = step.parse().map_err(|_| Error::Validation(format!("'{step}' is not a step number")))?;
+        details.get_mut(step).ok_or_else(|| Error::Validation(format!("the recipe has no step {step}")))?.ingredient_uids.push(uid.to_string());
+    }
+    let mut input = RecipeInput::from(c);
+    input.step_details = details;
+    db.update_recipe(&sc, id, input).await?;
+    Ok(Redirect::to(&format!("/recipes/{id}")))
+}
+
+// ---------- attachments ----------
+
+async fn add_asset(sc: Scope, State(s): State<AppState>, Path(id): Path<i64>, form: Multipart) -> Result<Redirect> {
+    let u = crate::features::read_upload(form).await?;
+    s.db.add_recipe_asset(&sc, id, &s.assets_dir(), &u.file_name, &u.name, &u.icon, &u.bytes).await?;
+    Ok(Redirect::to(&format!("/recipes/{id}")))
+}
+
+async fn delete_asset(sc: Scope, State(db): State<Db>, Path((id, hash)): Path<(i64, String)>) -> Result<Redirect> {
+    db.remove_recipe_asset(&sc, id, &hash).await?;
+    Ok(Redirect::to(&format!("/recipes/{id}")))
 }
 
 struct ReviewRow {
@@ -559,6 +952,9 @@ async fn review_save(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, body:
             });
         }
     }
+    // The review edits the same lines in the same order, so what they carry stays with them; rows dropped take their links with them.
+    let details: Vec<LineDetail> = old.ingredients.iter().take(rows.len()).map(|i| LineDetail { uid: Some(i.uid.clone()), section: i.section.clone(), substitutions: i.substitutions.clone() }).collect();
+    let step_details: Vec<StepDetail> = old.step_details.iter().map(|d| StepDetail { title: d.title.clone(), ingredient_uids: d.ingredient_uids.iter().filter(|u| details.iter().any(|x| x.uid.as_deref() == Some(u.as_str()))).cloned().collect() }).collect();
     // ponytail: units/foods created above stay if update_recipe then rejects the rows; harmless extras, one tx if it matters.
     db.update_recipe(
         &sc,
@@ -573,7 +969,12 @@ async fn review_save(sc: Scope, State(db): State<Db>, Path(id): Path<i64>, body:
             cookbooks: old.cookbooks,
             tools: old.tools,
             ingredients: rows.into_iter().map(|r| r.input).collect(),
+            ingredient_details: details,
             steps: old.steps,
+            step_details,
+            notes: None,
+            extras: None,
+            settings: None,
         },
     )
     .await?;

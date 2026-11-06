@@ -115,12 +115,19 @@ Sablier stops the container when idle, so stop/start is routine.
 - **Label**: name, colour. Used to group shopping-list items into sections.
 - **Ingredient line**: quantity as `qty_min`/`qty_max` (equal when not a range;
   both empty for "to taste"), unit, food, note, section title, substitutions,
-  plus the original text.
-- **Step**: text, optional title, and links to the ingredient lines it uses.
+  plus the original text, and a `uid`: a random id given once and kept by every
+  edit that leaves the line alone (the importer uses Mealie's reference id).
+  A substitution is `{qty, unit, food, note}` with names copied, not ids.
+- **Step**: text, optional title, and links to the ingredient lines it uses (by
+  `uid`). Stored beside `steps` as `step_details`, one entry per step, because
+  `steps` stays a list of strings.
+- **Recipe asset**: a file attached to a recipe (name, icon, cleaned file name),
+  stored under its sha256 in `<images dir>/assets/` without decoding.
 - **Recipe snapshot**: an immutable copy of a recipe, written on every edit. It
   copies unit and food names (and unit factors), steps, sections, links and
-  image hashes as they were, so later renames do not rewrite history. The live
-  recipe points at its latest snapshot.
+  image and asset hashes, sections, links, substitutions, notes, extras and settings
+  as they were, so later renames do not rewrite history. The live recipe points at its
+  latest snapshot.
 - **Batch**: one making of a recipe by a household. Fields: status (`planned`
   or `done`), snapshot (optional; empty for imported history), source
   (`native` or `imported`), date, scale factor, rating (1–5, optional), notes,
@@ -149,12 +156,28 @@ Sablier stops the container when idle, so stop/start is routine.
 
 CRUD in the API and the HTML form for every recipe field: steps, sections,
 tags, categories, tools, cookbooks, images, assets, notes, settings, extras.
-(Today the form has name, description, ingredients, steps one per line,
-comma-separated tags, categories, tools and cookbooks, nutrition and an image;
-the rest arrives with step 14. A name used by a recipe is added to its group's
-vocabulary if it is new.)
-Search. Every save writes a snapshot. Locked recipes refuse edits until
-unlocked. Favourites and ratings per user.
+A name used by a recipe is added to its group's vocabulary if it is new.
+Search. Every save writes a snapshot. Favourites and ratings per user (still to come).
+
+- **Form**: a `## ` line in the ingredients box starts a section, in the steps box
+  titles the step after it; notes, extras and substitutions are rows (a hidden
+  `features` field says the rows are the whole truth; without it they are left
+  as they are); a "Link ingredients" page ticks which lines each step uses.
+  Cook mode shows a step's linked lines under it, from the batch's snapshot and
+  amounts when cooking a batch.
+- **Lock**: a locked recipe refuses every edit (including attaching or removing a
+  file) with 422 "recipe is locked" unless the request sends `settings` with
+  `locked: false`. Leaving `settings`, `notes` or `extras` out of an update keeps
+  what the recipe has; `ingredient_details` and `step_details` replace it.
+- **Settings**: `locked`, `hide_nutrition` and `disable_comments` are enforced
+  (comments are `POST /api/recipes/{id}/comments`); `public`, `show_assets`,
+  `landscape_view` and `disable_amount` are Mealie's, kept and ignored.
+- **Assets**: any type up to 20 MB, served only by `GET /api/assets/{hash}?recipe=`
+  to the recipe's group, always `Content-Disposition: attachment` with
+  `X-Content-Type-Options: nosniff`. Export and restore carry them as `assets/<sha256>`.
+- **Food substitutions** are group-wide (`/api/foods/{id}/substitutions`,
+  `/api/food-substitutions/{id}`); extras on foods, shopping lists and items are
+  key/value strings, shown read-only on the list page.
 
 ### Units
 
@@ -448,9 +471,9 @@ rules.
 
 Remaining, in order:
 
-14. Recipe features: assets, notes, sections, ingredient links, substitutions,
-    extras, favourites and ratings, settings, recipe actions, foods on hand and
-    tools owned, share links.
+14. Recipe features. Part A done (2026-11-06): assets, notes, sections, ingredient
+    links, substitutions, extras, settings and their importer mapping. Part B:
+    favourites and ratings, recipe actions, foods on hand and tools owned, share links.
 15. Notifier events and scheduled webhooks.
 16. Fixture and importer coverage for every mapped table.
 17. Deploy (`stacks/mealier`).
@@ -459,12 +482,12 @@ Remaining, in order:
 
 2026-11-06.
 
-- Phase: step 13 (cookbook filters and meal-plan rules) done, not committed; 463 tests pass (1 ignored,
+- Phase: step 14 part A (recipe features) done, not committed; 507 tests pass (1 ignored,
   needs a real Mealie backup), clippy clean with `-D warnings`.
 - In flight: nothing. No agents or servers running.
 - Blocked on the owner: nothing until deploy (step 17 needs a GitHub repo,
   an Authentik application, and secrets).
-- Next: step 14 (recipe features), then 15–16 without stopping unless a decision is needed.
+- Next: step 14 part B, then 15–16 without stopping unless a decision is needed.
 - Production Mealie still holds the `mealier-fixture` items and three extra
   backups; `scripts/cleanup-mealie-fixture.py` removes the items after step 16
   (step 16 adds more fixture data first).

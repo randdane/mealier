@@ -36,6 +36,8 @@ pub struct ItemInput {
     pub checked: bool,
     /// Overrides the food's label.
     pub label_id: Option<i64>,
+    /// Left out: the item keeps its extras.
+    pub extras: Option<std::collections::BTreeMap<String, String>>,
 }
 
 async fn check_entry(db: &Db, sc: &Scope, i: &EntryInput) -> Result<()> {
@@ -139,7 +141,7 @@ impl Db {
     pub async fn update_item(&self, sc: &Scope, id: i64, input: ItemInput) -> Result<ShoppingItem> {
         self.item(sc, id).await?;
         let l = check_item(self, sc, input).await?;
-        sqlx::query("UPDATE shopping_list_items SET qty = ?, qty_max = ?, unit_id = ?, food_id = ?, note = ?, checked = ?, label_id = ? WHERE id = ? AND list_id IN (SELECT id FROM shopping_lists WHERE household_id = ?)")
+        sqlx::query("UPDATE shopping_list_items SET qty = ?, qty_max = ?, unit_id = ?, food_id = ?, note = ?, checked = ?, label_id = ?, extras = COALESCE(?, extras) WHERE id = ? AND list_id IN (SELECT id FROM shopping_lists WHERE household_id = ?)")
             .bind(l.qty)
             .bind(l.qty_max)
             .bind(l.unit_id)
@@ -147,6 +149,7 @@ impl Db {
             .bind(&l.note)
             .bind(l.checked)
             .bind(l.label_id)
+            .bind(l.extras.as_ref().map(serde_json::to_string).transpose()?)
             .bind(id)
             .bind(sc.household_id)
             .execute(&self.pool)
@@ -182,6 +185,7 @@ impl Db {
             note: if i.food_id.is_some() { i.note.clone() } else { i.original_text.clone() },
             checked: false,
             label_id: None,
+            extras: None,
         });
         self.merge_lines(sc, list_id, lines.collect(), recipe_id).await
     }
@@ -197,6 +201,7 @@ impl Db {
             note: if l.substitute_food_id.or(l.food_id).is_some() { String::new() } else { l.ingredient.clone() },
             checked: false,
             label_id: None,
+            extras: None,
         });
         self.merge_lines(sc, list_id, lines.collect(), b.batch.recipe_id).await
     }
@@ -233,13 +238,13 @@ impl Db {
     }
 
     async fn item(&self, sc: &Scope, id: i64) -> Result<ShoppingItem> {
-        let r = sqlx::query("SELECT id, qty, COALESCE(qty_max, qty), unit_id, food_id, note, checked, recipe_id, label_id FROM shopping_list_items WHERE id = ? AND list_id IN (SELECT id FROM shopping_lists WHERE household_id = ?)")
+        let r = sqlx::query("SELECT id, qty, COALESCE(qty_max, qty), unit_id, food_id, note, checked, recipe_id, label_id, extras FROM shopping_list_items WHERE id = ? AND list_id IN (SELECT id FROM shopping_lists WHERE household_id = ?)")
             .bind(id)
             .bind(sc.household_id)
             .fetch_optional(&self.pool)
             .await?
             .ok_or(Error::NotFound("shopping list item"))?;
-        Ok(ShoppingItem { id: r.get(0), qty: r.get(1), qty_max: r.get(2), unit_id: r.get(3), food_id: r.get(4), note: r.get(5), checked: r.get(6), recipe_id: r.get(7), label_id: r.get(8) })
+        Ok(ShoppingItem { id: r.get(0), qty: r.get(1), qty_max: r.get(2), unit_id: r.get(3), food_id: r.get(4), note: r.get(5), checked: r.get(6), recipe_id: r.get(7), label_id: r.get(8), extras: serde_json::from_str(r.get(9))? })
     }
 }
 
@@ -249,6 +254,7 @@ async fn check_item(db: &Db, sc: &Scope, mut i: ItemInput) -> Result<ItemInput> 
     if i.food_id.is_none() && i.note.trim().is_empty() {
         return Err(Error::Validation("an item needs a food or a note".into()));
     }
+    i.extras = i.extras.map(crate::recipes::check_extras).transpose()?;
     for (table, name, id) in [("units", "unit", i.unit_id), ("foods", "food", i.food_id), ("labels", "label", i.label_id)] {
         if let Some(id) = id
             && sqlx::query(&format!("SELECT 1 FROM {table} WHERE id = ? AND group_id = ?")).bind(id).bind(sc.group_id).fetch_optional(&db.pool).await?.is_none()
@@ -260,7 +266,7 @@ async fn check_item(db: &Db, sc: &Scope, mut i: ItemInput) -> Result<ItemInput> 
 }
 
 async fn insert_item(pool: &mut sqlx::SqliteConnection, list_id: i64, l: &ItemInput, recipe_id: Option<i64>) -> Result<i64> {
-    Ok(sqlx::query("INSERT INTO shopping_list_items (list_id, qty, qty_max, unit_id, food_id, note, checked, recipe_id, label_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    Ok(sqlx::query("INSERT INTO shopping_list_items (list_id, qty, qty_max, unit_id, food_id, note, checked, recipe_id, label_id, extras) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(list_id)
         .bind(l.qty)
         .bind(l.qty_max)
@@ -270,6 +276,7 @@ async fn insert_item(pool: &mut sqlx::SqliteConnection, list_id: i64, l: &ItemIn
         .bind(l.checked)
         .bind(recipe_id)
         .bind(l.label_id)
+        .bind(serde_json::to_string(&l.extras.clone().unwrap_or_default())?)
         .execute(pool)
         .await?
         .last_insert_rowid())
