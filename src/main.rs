@@ -59,6 +59,28 @@ fn data_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     })
 }
 
+const IMPORT_ARCHIVE_USAGE: &str = "usage: mealier import-archive <archive.db> --household <group>/<household> [--min-tag-count N]";
+
+/// `mealier import-archive`: ok/dup lines on stdout (for the crawler's mark-imported), the report on stderr.
+async fn import_archive_command() -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = std::env::args().skip(2);
+    let archive = args.next().ok_or(IMPORT_ARCHIVE_USAGE)?;
+    let (mut household, mut min_tag) = (None, 20u32);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--household" => household = args.next(),
+            "--min-tag-count" => min_tag = args.next().ok_or(IMPORT_ARCHIVE_USAGE)?.parse()?,
+            _ => return Err(IMPORT_ARCHIVE_USAGE.into()),
+        }
+    }
+    let dir = data_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let db = Db::open(&dir.join(mealier::backup::DB_FILE)).await?;
+    let report = mealier::archive::import_archive(&db, std::path::Path::new(&archive), &household.ok_or(IMPORT_ARCHIVE_USAGE)?, min_tag, &dir.join("images"), &mut std::io::stdout().lock()).await?;
+    eprintln!("{report}");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
@@ -78,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{report:#?}");
             return Ok(());
         }
+        Some("import-archive") => return import_archive_command().await,
         Some("run-scheduled") => {
             let db = Db::open(&data_dir()?.join(mealier::backup::DB_FILE)).await?;
             let r = db.run_scheduled(&mealier::Clock::now()).await?;
@@ -102,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             return Ok(());
         }
-        Some(other) => return Err(format!("unknown command '{other}' (commands: hash-password, healthcheck, import-mealie <zip>, run-scheduled, export <out.zip>, restore <in.zip>; the server takes no arguments)").into()),
+        Some(other) => return Err(format!("unknown command '{other}' (commands: hash-password, healthcheck, import-mealie <zip>, import-archive <archive.db>, run-scheduled, export <out.zip>, restore <in.zip>; the server takes no arguments)").into()),
         None => {}
     }
     let dir = data_dir()?;

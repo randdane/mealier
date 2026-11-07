@@ -763,13 +763,17 @@ Filter `rating` reads the caller's own rating (owner approved rewriting
 webhooks. 16. Fixture and importer coverage for every mapped table: the
 fixture holds real rows of every table Mealie's API can fill, and a test accounts for every table in it. 17. Deploy (`stacks/mealier`).
 
-Remaining: 18. Site archive: `tools/site_archive.py` and `mealier import-archive`.
+18. Site archive: `tools/site_archive.py` and `mealier import-archive`.
+
+Remaining: none planned.
 
 ## STATUS
 
 2026-11-06.
 
-- Phase: 1–17 done; deployed on `homelab` as `stacks/mealier`, `lifecycle: developing`.
-- Next: 18, site archive, specced above and reviewed.
+- Phase: 1–18 done; deployed on `homelab` as `stacks/mealier`, `lifecycle: developing`. Step 18 is not
+  in the deployed image yet.
+- Next for 18: fill the NYT `sitemap_url`, headers and challenge markers in `tools/site_archive.py`
+  (marked unverified), then a 3-URL live run before the full crawl.
 - Owner, later: `lifecycle: production` after a day of use; at cutover, clean the Mealie fixture data
   (`scripts/cleanup-mealie-fixture.py`), import a fresh backup, move the `mealie` vhost.

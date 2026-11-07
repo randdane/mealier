@@ -26,6 +26,7 @@ getrandom = "0.4.3"
 base64 = "0.22"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 tokio-util = { version = "0.7.20", features = ["io"] }
+zstd = "0.14.3"
 
 [dev-dependencies]
 http-body-util = "0.1.5"

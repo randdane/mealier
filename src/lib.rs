@@ -2,6 +2,7 @@ use std::path::Path;
 
 mod actions;
 pub mod api;
+pub mod archive;
 mod auth;
 mod guard;
 mod errors;
