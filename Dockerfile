@@ -10,10 +10,13 @@ COPY migrations migrations
 COPY templates templates
 COPY static static
 COPY src src
-RUN touch src/main.rs src/lib.rs && cargo build --release --locked
+RUN touch src/main.rs src/lib.rs && cargo build --release --locked && mkdir /data-empty
 
 FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build /src/target/release/mealier /mealier
+# A new named volume copies this directory's owner; without it the volume is root's
+# and the nonroot process cannot create its database.
+COPY --from=build --chown=65532:65532 /data-empty /data
 ENV MEALIER_DATA_DIR=/data BIND_ADDR=0.0.0.0 PORT=9000
 VOLUME /data
 USER nonroot
