@@ -9,7 +9,6 @@ import json
 import os
 import random
 import gzip
-from datetime import datetime
 import re
 import sqlite3
 import sys

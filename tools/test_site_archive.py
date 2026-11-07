@@ -466,6 +466,6 @@ def test_progress_is_logged_to_stderr_without_the_cookie(tmp_path, capsys):
     sa.seed(db, net.client, Clock())
     sa.crawl(db, net.client, Clock(), cookie="SECRET")
     err = capsys.readouterr().err
-    assert "sitemap 1/1" in err and "+1 recipe URLs" in err
+    assert "sitemap 1/2: index" in err and "sitemap 2/2: +1 recipe URLs" in err
     assert "[1/1]" in err and "recipe" in err
     assert "SECRET" not in err
