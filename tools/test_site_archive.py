@@ -444,3 +444,15 @@ def test_redirect_loop_is_a_failure_row_not_a_crash(tmp_path):
 def test_json_ld_tag_attribute_quoting(attr):
     html = f'<script {attr}>{{"@type": "Recipe", "name": "Q"}}</script>'
     assert json.loads(sa.find_recipe(html))["name"] == "Q"
+
+
+def test_seed_reads_gzipped_sitemaps_on_another_host(tmp_path):
+    import gzip
+    db = tmp_path / "a.db"
+    gz = lambda r: httpx.Response(200, content=gzip.compress(r.content),
+                                  headers={"content-type": "application/x-gzip"})
+    idx, sub = "https://www.example.com/sitemaps/c.xml.gz", "https://www.example.com/sitemaps/c-1.xml.gz"
+    net = Net({idx: gz(xml_index(sub)), sub: gz(xml_urlset(f"{BASE}/recipes/3-pie"))})
+    sa.seed(db, net.client, Clock(), site={**sa.SITE, "sitemap_url": idx})
+    assert rows(db, "select url from queue") == [(f"{BASE}/recipes/3-pie",)]
+    assert all("cookie" not in q.headers for q in net.requests)

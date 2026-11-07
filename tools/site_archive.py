@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import random
+import gzip
 import re
 import sqlite3
 import sys
@@ -23,15 +24,15 @@ import zstandard
 SITE = {
     "host": "cooking.nytimes.com",
     "recipe_path": "/recipes/",
-    "sitemap_url": "https://cooking.nytimes.com/sitemap.xml",  # unverified
+    "sitemap_url": "https://www.nytimes.com/sitemaps/new/cooking.xml.gz",  # from robots.txt, 2026-11-07
     "cookie_name": "NYT-S",
     # Copy these from the owner's real browser; no TLS impersonation.
     "headers": {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/130.0.0.0 Safari/537.36",
+                      "Chrome/156.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Sec-Ch-Ua": '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+        "Sec-Ch-Ua": '"Not:A-Brand";v="8", "Chromium";v="156", "Google Chrome";v="156"',
         "Sec-Ch-Ua-Mobile": "?0",
         "Sec-Ch-Ua-Platform": '"Linux"',
         "Sec-Fetch-Dest": "document",
@@ -195,7 +196,9 @@ def seed(db, client, sleep, site=SITE):
     with session(db) as conn:
         todo = [site["sitemap_url"]]
         while todo:
-            body = f.get(todo.pop(), (200,), "sitemap")[0].text
+            r = f.get(todo.pop(), (200,), "sitemap")[0]
+            raw = r.content
+            body = (gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw).decode("utf-8", "replace")
             locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", body)
             if "<sitemapindex" in body:
                 todo += locs
