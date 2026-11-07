@@ -657,8 +657,9 @@ cookie):
 - 429, challenge, other errors: as for pages, except a final failure leaves no
   row, so the next run tries again.
 
-**Breakers**, one set of counters shared by pages, images and sitemaps, reset
-by any 200:
+**Breakers**, one set of counters shared by pages, images and sitemaps. A 200
+resets the 429-per-URL and failure counters; the URLs-with-a-429 count lasts
+the whole batch:
 
 - 429: retry the same URL after 60, 120, 300, then 600 s. A fifth 429 on that
   URL aborts the run, as does a 429 on a second URL within the same batch.
