@@ -625,12 +625,10 @@ Remaining: 17. Deploy (`stacks/mealier`).
 
 ## STATUS (step 17, 2026-11-06)
 
-- Phase: deploying `stacks/mealier` on `homelab` (homelab commit `ddc8501`),
-  image tag `91d3dfb…`; the trial backup (`22.50.11`) is imported into
-  `mealier_data`. Container not started yet.
-- Blocked on the owner: the local admin password
-  (`ssh -t homelab bash ~/mealier-import/set-admin.sh`).
-- Next: `docker compose up -d` in `stacks/mealier`, test on `127.0.0.1:9926`,
-  then DNS records (owner), Caddy recreate (owner), Authentik provider.
-- Rollback: `docker compose down && docker volume rm mealier_data` in
-  `stacks/mealier`, then revert homelab `ddc8501`.
+- Phase: deployed on `homelab` as `stacks/mealier` (homelab `a4143dd`), image
+  `91d3dfb…`, trial backup imported, vhost live, Authentik SSO and local admin
+  both tested. `lifecycle: developing`.
+- Blocked on the owner: recreating the backup container so `mealier_data` is
+  archived.
+- Next: after a day of use, `lifecycle: production`; at cutover, clean the
+  Mealie fixture data, import a fresh backup, move the `mealie` vhost.
