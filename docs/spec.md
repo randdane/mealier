@@ -622,3 +622,15 @@ Remaining: 17. Deploy (`stacks/mealier`).
 - Production Mealie still holds the `mealier-fixture` items, a second group and household, a second user in
   it, and the backups made along the way; `scripts/cleanup-mealie-fixture.py` (dry run by default)
   removes them once the owner says so.
+
+## STATUS (step 17, 2026-11-06)
+
+- Phase: deploying `stacks/mealier` on `homelab` (homelab commit `ddc8501`),
+  image tag `91d3dfb…`; the trial backup (`22.50.11`) is imported into
+  `mealier_data`. Container not started yet.
+- Blocked on the owner: the local admin password
+  (`ssh -t homelab bash ~/mealier-import/set-admin.sh`).
+- Next: `docker compose up -d` in `stacks/mealier`, test on `127.0.0.1:9926`,
+  then DNS records (owner), Caddy recreate (owner), Authentik provider.
+- Rollback: `docker compose down && docker volume rm mealier_data` in
+  `stacks/mealier`, then revert homelab `ddc8501`.
