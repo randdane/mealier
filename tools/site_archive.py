@@ -9,6 +9,7 @@ import json
 import os
 import random
 import gzip
+from datetime import datetime
 import re
 import sqlite3
 import sys
@@ -107,6 +108,11 @@ class Abort(Exception):
     """Stop the run; the next one resumes where this stopped."""
 
 
+def log(msg):
+    """Progress on stderr. Never pass the cookie or request headers."""
+    print(f"{datetime.now():%H:%M:%S} {msg}", file=sys.stderr, flush=True)
+
+
 class Failed(Exception):
     """A URL that failed twice; the message is the reason stored in failures."""
 
@@ -125,7 +131,8 @@ class Fetcher:
         try:
             try:
                 got = self._try(url, ok, kind)
-            except Failed:
+            except Failed as e:
+                log(f"  {e} on {url}; retrying in 60 s")
                 self.sleep(60)
                 got = self._try(url, ok, kind)
         except Failed:
@@ -161,7 +168,9 @@ class Fetcher:
         if self.sent:
             self.sleep(random.uniform(2.5, 4.5))
         if self.sent and self.sent % self.pause_at == 0:
-            self.sleep(random.uniform(600, 900))
+            pause = random.uniform(600, 900)
+            log(f"batch done; resting {pause / 60:.0f} min")
+            self.sleep(pause)
             self.pause_at = random.randint(300, 500)
             self.sent = 0
         self.sent += 1
@@ -179,6 +188,7 @@ class Fetcher:
             self.n429[url] = self.n429.get(url, 0) + 1
             if self.n429[url] > len(WAITS_429):
                 raise Abort(f"fifth 429 on {url}")
+            log(f"  429 on {url}; waiting {WAITS_429[self.n429[url] - 1]} s")
             self.sleep(WAITS_429[self.n429[url] - 1])
 
     def _follow(self, url):
@@ -194,19 +204,25 @@ class Fetcher:
 def seed(db, client, sleep, site=SITE):
     f = Fetcher(client, sleep, site)
     with session(db) as conn:
-        todo = [site["sitemap_url"]]
+        todo, seen = [site["sitemap_url"]], 0
         while todo:
-            r = f.get(todo.pop(), (200,), "sitemap")[0]
+            seen += 1
+            sm = todo.pop()
+            r = f.get(sm, (200,), "sitemap")[0]
             raw = r.content
             body = (gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw).decode("utf-8", "replace")
             locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", body)
             if "<sitemapindex" in body:
                 todo += locs
+                log(f"sitemap {seen}/{seen + len(todo)}: index, {len(locs)} sitemaps  {sm}")
                 continue
+            added = 0
             for u in map(normalize, locs):
                 if is_recipe_url(site, u):
-                    conn.execute("INSERT OR IGNORE INTO queue VALUES (?,?,?)",
-                                 (u, site["host"], now()))
+                    added += conn.execute("INSERT OR IGNORE INTO queue VALUES (?,?,?)",
+                                          (u, site["host"], now())).rowcount
+            conn.commit()
+            log(f"sitemap {seen}/{seen + len(todo)}: +{added} recipe URLs  {sm}")
 
 
 LD_RE = re.compile(r'<script[^>]*type=["\']?application/ld\+json["\']?(?=[\s>/])[^>]*>(.*?)</script>', re.S)
@@ -239,10 +255,11 @@ def crawl(db, client, sleep, limit=None, site=SITE, cookie=None):
             "SELECT url FROM queue WHERE url NOT IN (SELECT url FROM pages)"
             " AND url NOT IN (SELECT url FROM failures) ORDER BY url LIMIT ?",
             (limit if limit else -1,))]
-        for url in urls:
+        for i, url in enumerate(urls, 1):
             try:
                 r, final = f.get(url)
             except Failed as e:
+                log(f"[{i}/{len(urls)}] failed ({e})  {url}")
                 conn.execute("INSERT OR REPLACE INTO failures VALUES (?,?,?,2)",
                              (url, now(), str(e)))
                 conn.commit()
@@ -254,8 +271,9 @@ def crawl(db, client, sleep, limit=None, site=SITE, cookie=None):
                 " VALUES (?,?,?,?,?,?)",
                 (url, normalize(final), now(), r.status_code,
                  zstandard.compress(r.content) if html else None,
-                 find_recipe(html) if html else None))
+                 ld := find_recipe(html) if html else None))
             conn.commit()
+            log(f"[{i}/{len(urls)}] {r.status_code} {'recipe' if ld else 'no JSON-LD'}  {url}")
 
 
 def requeue_failed(db):

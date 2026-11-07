@@ -456,3 +456,16 @@ def test_seed_reads_gzipped_sitemaps_on_another_host(tmp_path):
     sa.seed(db, net.client, Clock(), site={**sa.SITE, "sitemap_url": idx})
     assert rows(db, "select url from queue") == [(f"{BASE}/recipes/3-pie",)]
     assert all("cookie" not in q.headers for q in net.requests)
+
+
+def test_progress_is_logged_to_stderr_without_the_cookie(tmp_path, capsys):
+    db = tmp_path / "a.db"
+    net = Net({SITEMAP: xml_index(f"{BASE}/sm1.xml"),
+               f"{BASE}/sm1.xml": xml_urlset(f"{BASE}/recipes/1-soup"),
+               f"{BASE}/recipes/1-soup": httpx.Response(200, text=recipe_html({"@type": "Recipe"}))})
+    sa.seed(db, net.client, Clock())
+    sa.crawl(db, net.client, Clock(), cookie="SECRET")
+    err = capsys.readouterr().err
+    assert "sitemap 1/1" in err and "+1 recipe URLs" in err
+    assert "[1/1]" in err and "recipe" in err
+    assert "SECRET" not in err
