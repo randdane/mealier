@@ -81,7 +81,7 @@ fn quantity(s: &str) -> Option<(f64, f64, &str)> {
     let after = rest.trim_start();
     let tail = if let Some(t) = after.strip_prefix(['-', '–', '—']) {
         Some(('-', t))
-    } else if after.len() > 3 && after[..2].eq_ignore_ascii_case("to") && after[2..].starts_with(' ') {
+    } else if after.len() > 3 && after.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("to")) && after[2..].starts_with(' ') {
         Some(('t', &after[2..]))
     } else {
         None

@@ -135,3 +135,10 @@ fn partial_and_unparseable() {
         ("For the sauce:", None, None, None, None, "", Confidence::None),
     ]);
 }
+
+#[test]
+fn multibyte_character_after_a_number_does_not_panic() {
+    // "t½": a byte slice of the first two bytes ends inside '½'.
+    let p = parse_line("2 t½ zorblax", &units(), &foods());
+    assert_eq!(p.qty_min, Some(2.0));
+}
