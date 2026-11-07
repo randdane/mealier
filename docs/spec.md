@@ -583,6 +583,161 @@ notifiers; scheduled webhooks.
 report: `recipe_note_ref_link` (note references on steps), `shopping_list_recipe_reference` (a list's own
 recipe references) and `households_to_recipes` (`last_made` with no made-it event).
 
+## Site archive and `import-archive`
+
+A slow, resumable crawl of a recipe site into SQLite, and an offline import
+from it. The first site is NYT Cooking (about 22k recipes), crawled with the
+owner's subscriber cookie. Keeping the raw page means a parser change can be
+re-run without fetching again.
+
+**Accepted risk.** NYT's terms forbid bulk automated access, and a flagged
+crawl can cost the subscription. The crawler is polite and stops at the first
+sign of being challenged. It copies the owner's real browser headers and does
+no TLS fingerprint impersonation, and it never retries past a challenge.
+
+### The crawler: `tools/site_archive.py`
+
+PEP 723 inline metadata, `requires-python = ">=3.15"`, dependencies `httpx[http2]`
+and `zstandard`; run with `uv run tools/site_archive.py <command>`. It is
+generic, with the NYT specifics (host, sitemap URL, recipe URL pattern, cookie
+name, challenge markers) in one per-site table at the top. It runs by hand in
+`tmux` on `sys76`, from the home IP, never on `homelab` and never from a timer.
+
+- Data: `${XDG_DATA_HOME:-$HOME/.local/share}/_r_/site-archive/archive.db`. The
+  db never goes in the repo. Every connection sets `PRAGMA foreign_keys = ON`;
+  every command ends with `PRAGMA wal_checkpoint(TRUNCATE)`, so the `.db` file
+  alone is complete when no command is running.
+- Cookie: `${XDG_DATA_HOME:-$HOME/.local/share}/_r_/nyt/cookie` (dir 700,
+  file 600, the bare `NYT-S` value). It is never taken from argv and never logged.
+  It is sent only to the site's own host: a redirect to any other host is
+  followed without it, and `seed` never sends it (sitemaps are public).
+- Headers: a desktop browser's `User-Agent`, `Accept`, `Accept-Language`,
+  `Sec-Ch-Ua*` and `Sec-Fetch-*`, set in the site table. HTTP/2.
+- URLs are normalized before they are stored or compared: scheme and host
+  lowercased, query and fragment dropped, trailing slash removed.
+
+**Pacing** applies to every request of every command: one at a time, a
+`uniform(2.5, 4.5)` s sleep between requests, and after `randint(300, 500)`
+requests a `uniform(10, 15)` min pause.
+
+Commands:
+
+- `seed`: fetches the site's sitemap, follows sitemap indexes, and inserts each
+  recipe URL into `queue` (insert-or-ignore). Safe to run again.
+- `crawl [--limit N]`: fetches queued URLs that have no `pages` row and no
+  open `failures` row, storing each as it goes, so Ctrl-C loses at most the
+  request in flight.
+- `fetch-images [--limit N]`: a second, separate pass. For each recipe page with
+  an image URL in its JSON-LD and no `images` row, it fetches that one image.
+- `requeue-failed`: deletes `failures` rows so `crawl` tries those URLs again.
+- `mark-imported <file>`: reads the importer's stdout (below) and sets
+  `pages.mealier_imported_at` for `ok` and `dup` lines.
+- `prune-html [--dry-run]`: nulls `raw_html` on pages that are imported and
+  have `json_ld`. Run by hand only, when the owner is satisfied the parser is
+  final; prints the count first.
+- `stats`: counts by state (queued, fetched, recipe, not a recipe, gone,
+  failed, imported, images by status).
+
+**Outcomes of a page fetch** (redirects followed within the site's host):
+
+- 200: stored in `pages` with `final_url`. JSON-LD is extracted (including
+  `@graph`, and `@type` given as a list); malformed or absent JSON-LD leaves
+  `json_ld` NULL, which is "not a recipe page" or "microdata only", not a failure.
+- 404 or 410: stored in `pages` with that status and no HTML. Terminal.
+- Challenge (below): abort.
+- Anything else, or a network error: one retry after 60 s; if that fails too,
+  a `failures` row, and the crawl moves on.
+
+**Outcomes of an image fetch** (redirects followed to any host, without the
+cookie):
+
+- 200 with an `image/*` content type: `images` row, `status = 'ok'`.
+- 404, 410, or a 200 that is not an image: `images` row with that status and no
+  bytes. Not retried.
+- 429, challenge, other errors: as for pages, except a final failure leaves no
+  row, so the next run tries again.
+
+**Breakers**, one set of counters shared by pages, images and sitemaps, reset
+by any 200:
+
+- 429: retry the same URL after 60, 120, 300, then 600 s. A fifth 429 on that
+  URL aborts the run, as does a 429 on a second URL within the same batch.
+- Challenge: 401 or 403, a page redirect off the recipe path (login,
+  subscription gate), or a body matching a challenge marker. Abort immediately,
+  store nothing for that URL, print why. The next run starts where this one
+  stopped.
+- Five URLs in a row ending in a `failures` row abort the run.
+
+### Schema
+
+```sql
+CREATE TABLE queue (               -- rows are never deleted
+  url       TEXT PRIMARY KEY,      -- normalized
+  site      TEXT NOT NULL,
+  queued_at TEXT NOT NULL
+);
+CREATE TABLE pages (               -- 200, 404 and 410 only
+  url                 TEXT PRIMARY KEY REFERENCES queue(url),
+  final_url           TEXT NOT NULL, -- normalized, after redirects
+  fetched_at          TEXT NOT NULL,
+  status_code         INTEGER NOT NULL,
+  raw_html            BLOB,        -- zstd; NULL for 404/410 and after prune-html
+  json_ld             TEXT,        -- the Recipe object; NULL if none was found
+  is_recipe           INTEGER GENERATED ALWAYS AS (json_ld IS NOT NULL) STORED,
+  mealier_imported_at TEXT
+);
+CREATE TABLE failures (            -- open failures; requeue-failed clears them
+  url          TEXT PRIMARY KEY REFERENCES queue(url),
+  attempted_at TEXT NOT NULL,
+  reason       TEXT NOT NULL,      -- 'http 502', 'timeout', ...
+  attempts     INTEGER NOT NULL
+);
+CREATE TABLE images (
+  page_url     TEXT PRIMARY KEY REFERENCES pages(url),
+  src_url      TEXT NOT NULL,
+  fetched_at   TEXT NOT NULL,
+  status       TEXT NOT NULL,      -- 'ok', 'http 404', 'not an image'
+  content_type TEXT,
+  bytes        BLOB                -- NULL unless status = 'ok'
+);
+```
+
+### `mealier import-archive`
+
+```bash
+docker compose run --rm -v /path/archive.db:/archive.db:ro mealier \
+  import-archive /archive.db --household home/family > imported.txt
+```
+
+- Only the `.db` file is mounted; the crawler must not be running. mealier opens
+  it on its own connection (`?mode=ro&immutable=1`), not through `Db::open`,
+  which enables WAL and runs migrations. mealier never writes to it.
+- `--household <group-slug>/<household-slug>` is required. The author is that
+  household's enabled admin with the lowest id; the command fails if there is none.
+- The import makes no network and no LLM calls. It does not go through the
+  URL-import service (which fetches); it calls the extractors directly:
+  `json_ld` through `find_recipe` and `map_jsonld`, or, when `json_ld` is NULL
+  and `raw_html` is present, `Microdata.import` on the decompressed HTML. Only
+  pages with `status_code = 200` are read. A page that yields no recipe is
+  reported as skipped.
+- **Dedupe:** on the page's `final_url` against `recipes.source_url` in that
+  group, both normalized as the crawler does. A match is skipped, never updated.
+  There is no `--refresh`. No unique index is added: imported Mealie data may
+  already hold duplicates. Two imports must not run at once; the import is one
+  serial process.
+- **Tags:** `recipeCategory` becomes categories as usual. Keywords (from JSON-LD
+  or microdata) are split on commas, trimmed and lowercased; one becomes a tag
+  only if at least `--min-tag-count` distinct pages (default 20) carry it,
+  counted once before the import starts.
+- **Images:** from an `images` row with `status = 'ok'`, through the image
+  module's preparation (decode, resize, one copy). An image it rejects is
+  reported, and the recipe is imported without one.
+- Each recipe goes in its own transaction, so one bad page does not stop the run.
+- Output: one line per page on stdout, `ok\t<url>` for imported and
+  `dup\t<url>` for already present, so a rerun after a crash still reports every
+  imported URL to `mark-imported`. The report (counts, plus each skip and failure
+  with its reason) goes on stderr.
+
 ## Deployment
 
 `stacks/mealier` in the homelab repo: Caddy vhost, `edge` network, Sablier
@@ -604,31 +759,16 @@ rules. 14. Recipe features: assets, notes, sections, ingredient links, substitut
 favourites and ratings, recipe actions, foods on hand and tools owned, share links; and their importer mapping.
 Filter `rating` reads the caller's own rating (owner approved rewriting
 `tests/filter.rs::last_made_and_rating_read_the_callers_household`). 15. Notifier events and scheduled
-webhooks (not committed). 16. Fixture and importer coverage for every mapped table (not committed): the
-fixture holds real rows of every table Mealie's API can fill, and a test accounts for every table in it.
+webhooks. 16. Fixture and importer coverage for every mapped table: the
+fixture holds real rows of every table Mealie's API can fill, and a test accounts for every table in it. 17. Deploy (`stacks/mealier`).
 
-Remaining: 17. Deploy (`stacks/mealier`).
+Remaining: 18. Site archive: `tools/site_archive.py` and `mealier import-archive`.
 
 ## STATUS
 
 2026-11-06.
 
-- Phase: step 16 done, not committed (with 15). Fixture rebuilt from a real backup of production Mealie
-  with real rows for every table the API can fill; importer fixed where a guess was wrong; every table in
-  the fixture is imported or skipped on purpose, asserted against a literal list.
-- Blocked on the owner: nothing until step 17 (a GitHub repo, an Authentik application, and
-  secrets).
-- Next: 17, deploy.
-- Production Mealie still holds the `mealier-fixture` items, a second group and household, a second user in
-  it, and the backups made along the way; `scripts/cleanup-mealie-fixture.py` (dry run by default)
-  removes them once the owner says so.
-
-## STATUS (step 17, 2026-11-06)
-
-- Phase: deployed on `homelab` as `stacks/mealier` (homelab `a4143dd`), image
-  `91d3dfb…`, trial backup imported, vhost live, Authentik SSO and local admin
-  both tested. `lifecycle: developing`.
-- Blocked on the owner: recreating the backup container so `mealier_data` is
-  archived.
-- Next: after a day of use, `lifecycle: production`; at cutover, clean the
-  Mealie fixture data, import a fresh backup, move the `mealie` vhost.
+- Phase: 1–17 done; deployed on `homelab` as `stacks/mealier`, `lifecycle: developing`.
+- Next: 18, site archive, specced above and reviewed.
+- Owner, later: `lifecycle: production` after a day of use; at cutover, clean the Mealie fixture data
+  (`scripts/cleanup-mealie-fixture.py`), import a fresh backup, move the `mealie` vhost.
